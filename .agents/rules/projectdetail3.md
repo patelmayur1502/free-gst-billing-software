@@ -112,7 +112,7 @@ src/
 │   ├── PrintSettings.jsx     # Typography, paper dimensions (A4, thermal 80mm/58mm)
 │   ├── BillOCR.jsx           # Tesseract.js scanner for supplier bills
 │   ├── BulkCsvImport.jsx     # Bulk import/export for sales & purchase invoices
-│   ├── TallySyncModal.jsx    # 1-click Tally XML export (for CA) and Tally master import
+│   ├── TallySyncModal.jsx    # 1-click Tally XML export (for CA) and Tally master import (UTF-16LE, ERP 9, Prime)
 │   ├── StockReport.jsx       # Closing stock valuation & item movement ledger (In/Out)
 │   ├── ControlPanel.jsx      # Embedded desktop server management
 │   ├── AppLock.jsx           # PIN lock screen overlay

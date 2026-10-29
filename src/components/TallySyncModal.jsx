@@ -109,11 +109,38 @@ export default function TallySyncModal({ show, onClose }) {
 
     const reader = new FileReader();
     reader.onload = (evt) => {
-      const text = evt.target.result;
-      const res = parseTallyMasterXml(text);
-      setParsedData(res);
+      try {
+        const buffer = evt.target.result;
+        const bytes = new Uint8Array(buffer);
+        let text = '';
+
+        // Tally ERP 9 / Prime XML encoding detection (UTF-16LE with or without BOM, UTF-16BE, UTF-8)
+        if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+          text = new TextDecoder('utf-16le').decode(buffer);
+        } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+          text = new TextDecoder('utf-16be').decode(buffer);
+        } else if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+          text = new TextDecoder('utf-8').decode(buffer);
+        } else if (bytes.length > 4 && bytes[1] === 0x00 && bytes[3] === 0x00) {
+          text = new TextDecoder('utf-16le').decode(buffer);
+        } else {
+          try {
+            text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+          } catch {
+            text = new TextDecoder('utf-16le').decode(buffer);
+          }
+        }
+
+        const res = parseTallyMasterXml(text);
+        setParsedData(res);
+        if (res.clients.length === 0 && res.products.length === 0 && res.errors?.length) {
+          toast(res.errors[0], 'error');
+        }
+      } catch (err) {
+        toast('Failed to read file: ' + err.message, 'error');
+      }
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
   };
 
   const handleRunImport = async () => {

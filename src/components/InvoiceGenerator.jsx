@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer, Eye, EyeOff, History } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { saveBill, deleteBill, applyStockChanges, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllRecurring, getAllBills } from '../store';
@@ -16,6 +16,7 @@ import HelpButton from './HelpButton';
 import { getClientCredit, planCreditApplication } from '../utils/clientCredit';
 import ClientModal from './ClientModal';
 import { toast } from './Toast';
+import { getItemSalesHistory } from '../utils/itemHistory.js';
 
 // Rich text editor component that works with contentEditable properly
 function RichEditor({ value, onChange, placeholder, toolbar = false }) {
@@ -281,7 +282,13 @@ const LineItem = memo(function LineItem({
   onFieldChange, onSelectProduct, onSetProductSearch,
   onAddCustomUnit, onRemoveCustomUnit, onRemove, clampNonNeg,
   isLastRow, onAddRow, isOnlyRow,
+  bills = [], clientName = '',
 }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const history = useMemo(() => {
+    if (!item.name || !item.name.trim()) return null;
+    return getItemSalesHistory({ itemName: item.name, clientName, bills });
+  }, [item.name, clientName, bills]);
   // v1.10.37 — Keyboard shortcut: Enter on any input inside the LAST
   // row adds a new row. Muscle-memory for POS users — reported: "if
   // user hits Enter on last item field the natural expectation is a
@@ -383,11 +390,65 @@ const LineItem = memo(function LineItem({
           ))}
         </select>
       </div>
-      <div className="line-item-field" style={{ flex: 1.2 }}>
-        <label className="form-label">Rate</label>
+      <div className="line-item-field" style={{ flex: 1.2, position: 'relative' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <label className="form-label" style={{ marginBottom: 0 }}>Rate</label>
+          {history && (history.lastPartySale || history.otherPartyHistory.length > 0) && (
+            <button
+              type="button"
+              className="btn-text"
+              onClick={() => setShowHistory(v => !v)}
+              title="View previous selling rates to this party & others (Alt+S)"
+              style={{ fontSize: '0.68rem', padding: '0 4px', color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: 2, border: 'none', background: 'transparent', cursor: 'pointer' }}>
+              <History size={11} /> {history.lastPartySale ? `₹${history.lastPartySale.rate}` : 'History'}
+            </button>
+          )}
+        </div>
         <input type="number" min="0" step="any" className="form-input" value={item.rate}
           onFocus={(e) => e.target.select()}
           onChange={(e) => onFieldChange(item.id, 'rate', clampNonNeg(e.target.value))} />
+        {showHistory && history && (
+          <div className="rate-history-popover" style={{
+            position: 'absolute', top: '100%', right: 0, width: 260, zIndex: 60,
+            background: 'var(--bg-primary, #ffffff)', border: '1px solid var(--border-color, #e5e7eb)',
+            boxShadow: '0 10px 15px -3px rgba(0,0,0,0.15)',
+            borderRadius: 6, padding: '0.5rem', fontSize: '0.75rem', color: 'var(--text-primary)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem', borderBottom: '1px solid var(--border-color, #eee)', paddingBottom: '0.25rem' }}>
+              <strong style={{ fontSize: '0.78rem' }}>Price History</strong>
+              <button type="button" onClick={() => setShowHistory(false)} style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-muted)' }}>✕</button>
+            </div>
+            {history.lastPartySale ? (
+              <div style={{ marginBottom: '0.4rem', background: 'rgba(37,99,235,0.08)', padding: '0.35rem', borderRadius: 4 }}>
+                <div style={{ color: 'var(--primary)', fontWeight: 600, fontSize: '0.72rem' }}>To {clientName || 'This Party'}:</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+                  <span>{history.lastPartySale.invoiceDate} · Qty {history.lastPartySale.quantity} @ <strong>₹{history.lastPartySale.rate}</strong></span>
+                  <button type="button" className="btn-sm" style={{ padding: '1px 5px', fontSize: '0.68rem', cursor: 'pointer' }} onClick={() => { onFieldChange(item.id, 'rate', history.lastPartySale.rate); setShowHistory(false); }}>Apply</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: '0.35rem' }}>No previous sales to this party.</div>
+            )}
+            {history.otherPartyHistory.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 600, color: 'var(--text-muted)', fontSize: '0.7rem', marginBottom: 2 }}>Other Customers:</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 100, overflowY: 'auto' }}>
+                  {history.otherPartyHistory.map((h, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', borderBottom: '1px dashed var(--border-color, #eee)' }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 130 }} title={h.clientName}>
+                        {h.clientName}
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontWeight: 600 }}>₹{h.rate}</span>
+                        <button type="button" className="btn-sm" style={{ padding: '1px 4px', fontSize: '0.65rem', cursor: 'pointer' }} onClick={() => { onFieldChange(item.id, 'rate', h.rate); setShowHistory(false); }}>Apply</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       {invoiceOptions.showDiscount && (
         <div className="line-item-field" style={{ flex: 1.8, minWidth: 200 }}>
@@ -4372,6 +4433,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                 isLastRow={idx === items.length - 1}
                 isOnlyRow={items.length === 1}
                 onAddRow={addItem}
+                bills={allBillsForCredit}
+                clientName={client?.name}
               />
             ))}
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>

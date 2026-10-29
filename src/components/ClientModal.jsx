@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X, Search, ExternalLink, CheckCircle } from 'lucide-react';
 import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, PAPER_SIZES, decodeGstin } from '../utils';
 import { getRegionMode } from '../store';
+import { lookupGstinOnline, openGstPortalVerification } from '../utils/gstinLookup.js';
 
 export default function ClientModal({ show, onClose, onSave, client, isEditing, defaultCountry }) {
   // Country defaults: explicit prop (active business profile) → browser locale → 'India'.
@@ -18,6 +19,32 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
   };
   const [form, setForm] = useState({ ...emptyForm });
   const [taxIdWarning, setTaxIdWarning] = useState('');
+  const [isFetchingGst, setIsFetchingGst] = useState(false);
+  const [gstStatus, setGstStatus] = useState('');
+
+  const handleFetchGst = async () => {
+    if (!form.gstin || form.gstin.length < 15) return;
+    setIsFetchingGst(true);
+    setTaxIdWarning('');
+    try {
+      const info = await lookupGstinOnline(form.gstin);
+      if (info) {
+        setForm(prev => ({
+          ...prev,
+          name: prev.name || info.name || info.tradeName || '',
+          address: prev.address || info.address || '',
+          city: prev.city || info.city || '',
+          pin: prev.pin || info.pin || '',
+          state: info.state || prev.state,
+        }));
+        setGstStatus(info.status || 'Verified');
+      }
+    } catch (err) {
+      setTaxIdWarning(err.message || 'Lookup failed');
+    } finally {
+      setIsFetchingGst(false);
+    }
+  };
 
   useEffect(() => {
     if (show && client) {
@@ -118,13 +145,40 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
             )}
           </div>
           <div className="form-group">
-            <label className="form-label">{cc.taxIdLabel}</label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label className="form-label" style={{ marginBottom: 0 }}>{cc.taxIdLabel}</label>
+              {form.country === 'India' && form.gstin && form.gstin.length >= 15 && (
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="btn-text"
+                    onClick={handleFetchGst}
+                    disabled={isFetchingGst}
+                    style={{ fontSize: '0.72rem', color: 'var(--primary)', border: 'none', background: 'transparent', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    <Search size={11} /> {isFetchingGst ? 'Fetching…' : 'Fetch Details'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-text"
+                    onClick={() => openGstPortalVerification(form.gstin)}
+                    title="Verify live on official GST portal"
+                    style={{ fontSize: '0.72rem', color: 'var(--text-muted)', border: 'none', background: 'transparent', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    <ExternalLink size={11} /> Portal
+                  </button>
+                </div>
+              )}
+            </div>
             <input type="text" className="form-input"
               style={taxIdWarning ? { borderColor: '#f59e0b' } : undefined}
               value={form.gstin}
               onChange={e => { setForm(prev => ({ ...prev, gstin: e.target.value.toUpperCase() })); if (taxIdWarning) setTaxIdWarning(''); }}
               onBlur={handleTaxIdBlur}
               placeholder={cc.taxIdPlaceholder} maxLength={20} />
+            {gstStatus && (
+              <small style={{ color: '#059669', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 3, marginTop: '0.2rem' }}>
+                <CheckCircle size={11} /> {gstStatus}
+              </small>
+            )}
             {taxIdWarning && <small style={{ color: '#d97706', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>⚠ {taxIdWarning}</small>}
           </div>
           <div className="form-group">

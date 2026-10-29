@@ -44,6 +44,15 @@ export const getInvoiceNumberSettings = async () => {
   return { ...DEFAULT_INV_SETTINGS, ...(value || {}) };
 };
 
+// v1.10.82 - GST API Key & Gateway Provider settings
+export const getGstApiConfig = async () => {
+  const { value } = await apiFetch(`${API}/meta/gstApiConfig`);
+  return value || { provider: 'sandbox', apiKey: '', apiSecret: '', customEndpoint: '', portalAccess: {} };
+};
+export const saveGstApiConfig = (cfg) => apiFetch(`${API}/meta/gstApiConfig`, {
+  method: 'POST', body: JSON.stringify({ value: cfg }),
+});
+
 export const saveInvoiceNumberSettings = async (settings) => {
   await apiFetch(`${API}/meta/invoiceNumberSettings`, {
     method: 'POST',

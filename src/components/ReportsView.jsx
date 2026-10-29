@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Wallet, BarChart3, Clock, Search, X, Users, Package, Boxes } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, BarChart3, Clock, Search, X, Users, Package, Boxes, Layers } from 'lucide-react';
 import { getAllBills, getAllExpenses, getProfile } from '../store';
 import { formatCurrency, getFYOptions, belongsToProfile, isCancelledBill, salesSign, countsAsSales, calculateLineItemTax, roundQty, parseLocalDate, amountDue } from '../utils';
 import { toast } from './Toast';
@@ -7,6 +7,7 @@ import HelpButton from './HelpButton';
 import PartyOutstandingReport from './PartyOutstandingReport';
 import StockReport from './StockReport';
 import TableExport from './TableExport';
+import TallySyncModal from './TallySyncModal.jsx';
 import { billCurrency } from '../utils/partyOutstanding';
 
 const MONTHS = [
@@ -22,6 +23,7 @@ export default function ReportsView() {
   const [bills, setBills] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [activeTab, setActiveTab] = useState('pl');
+  const [showTallySync, setShowTallySync] = useState(false);
   const [filterMode, setFilterMode] = useState('fy');
   const [fyFilter, setFyFilter] = useState('');
   const [monthFilter, setMonthFilter] = useState('');
@@ -227,6 +229,12 @@ export default function ReportsView() {
         <button className={`btn ${activeTab === 'stock' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setActiveTab('stock')}>
           <Boxes size={16} /> Stock
+        </button>
+        <button className="btn btn-secondary"
+          type="button"
+          onClick={() => setShowTallySync(true)}
+          style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.4rem', borderColor: 'var(--primary)', color: 'var(--primary)' }}>
+          <Layers size={16} /> Tally XML (for CA)
         </button>
       </div>
 
@@ -720,6 +728,7 @@ export default function ReportsView() {
           </div>
         );
       })()}
+      <TallySyncModal show={showTallySync} onClose={() => setShowTallySync(false)} />
     </div>
   );
 }

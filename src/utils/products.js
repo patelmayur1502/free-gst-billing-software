@@ -64,3 +64,102 @@ export const stockValueOf = (product, quantity) => {
   const price = cost > 0 ? cost : (Number(product?.sellingPrice) || Number(product?.rate) || 0);
   return { price, value: Math.round(price * (Number(quantity) || 0) * 100) / 100, atCost: cost > 0 };
 };
+
+/**
+ * Computes item movement ledger for a date range:
+ * Opening Stock + Inward - Outward = Closing Stock.
+ */
+export const stockMovementLedger = (products, bills, purchases, startDate, endDate) => {
+  // Opening stock is as of the day before startDate
+  const startD = new Date(`${startDate}T00:00:00`);
+  startD.setDate(startD.getDate() - 1);
+  const prevDate = startD.toISOString().slice(0, 10);
+
+  const openingMap = closingStock(products, bills, purchases, prevDate);
+  const closingMap = closingStock(products, bills, purchases, endDate);
+
+  const byName = new Map((products || []).map((p) => [String(p.name || '').trim().toLowerCase(), p.id]));
+  const inwardMap = new Map();
+  const outwardMap = new Map();
+
+  for (const pur of purchases || []) {
+    if (!pur?.date || pur.date < startDate || pur.date > endDate) continue;
+    for (const it of pur.items || []) {
+      const id = it.productId || byName.get(String(it.name || '').trim().toLowerCase());
+      if (id) {
+        const q = Number(it.quantity) || 0;
+        inwardMap.set(id, (inwardMap.get(id) || 0) + q);
+      }
+    }
+  }
+
+  for (const b of bills || []) {
+    if (!b?.invoiceDate || b.invoiceDate < startDate || b.invoiceDate > endDate || isCancelledBill(b)) continue;
+    for (const [id, change] of Object.entries(appliedStock(b))) {
+      const q = Math.abs(change);
+      outwardMap.set(id, (outwardMap.get(id) || 0) + q);
+    }
+  }
+
+  return (products || []).map((p) => {
+    const opening = openingMap.get(p.id) ?? 0;
+    const inward = inwardMap.get(p.id) ?? 0;
+    const outward = outwardMap.get(p.id) ?? 0;
+    const closing = closingMap.get(p.id) ?? (opening + inward - outward);
+    const { price, value } = stockValueOf(p, closing);
+
+    return {
+      product: p,
+      opening: Math.round(opening * 1000) / 1000,
+      inward: Math.round(inward * 1000) / 1000,
+      outward: Math.round(outward * 1000) / 1000,
+      closing: Math.round(closing * 1000) / 1000,
+      rate: price,
+      valuation: value,
+    };
+  });
+};
+
+/**
+ * Computes party-wise customer sales breakdown for a single product.
+ */
+export const productPartySalesBreakdown = (product, bills, startDate, endDate) => {
+  if (!product) return [];
+  const targetId = product.id;
+  const targetName = String(product.name || '').trim().toLowerCase();
+  const partyMap = new Map();
+
+  for (const b of bills || []) {
+    if (!b || isCancelledBill(b)) continue;
+    const d = b.invoiceDate || b.data?.details?.invoiceDate;
+    if (startDate && d < startDate) continue;
+    if (endDate && d > endDate) continue;
+
+    const clientName = String(b.data?.client?.name || b.clientName || 'Cash / Unnamed').trim();
+    const items = b.data?.items || [];
+
+    for (const it of items) {
+      const matchId = it.productId === targetId;
+      const matchName = String(it.name || '').trim().toLowerCase() === targetName;
+      if (matchId || matchName) {
+        const qty = Number(it.quantity) || 0;
+        const rate = Number(it.rate) || 0;
+        const amount = qty * rate;
+
+        const current = partyMap.get(clientName) || { clientName, quantity: 0, totalAmount: 0, txns: 0, lastDate: d };
+        current.quantity += qty;
+        current.totalAmount += amount;
+        current.txns += 1;
+        if (!current.lastDate || d > current.lastDate) current.lastDate = d;
+        partyMap.set(clientName, current);
+      }
+    }
+  }
+
+  return Array.from(partyMap.values())
+    .map((p) => ({
+      ...p,
+      avgRate: p.quantity > 0 ? Math.round((p.totalAmount / p.quantity) * 100) / 100 : 0,
+    }))
+    .sort((a, b) => b.quantity - a.quantity);
+};

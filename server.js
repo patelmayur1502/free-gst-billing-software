@@ -360,6 +360,143 @@ app.delete('/api/clients/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// v1.10.82 - Sandbox.co.in token cache & exchange helper
+let sandboxTokenCache = { token: null, key: null, expiresAt: 0 };
+
+async function getSandboxAccessToken(apiKey, apiSecret) {
+  if (sandboxTokenCache.token && sandboxTokenCache.key === apiKey && Date.now() < sandboxTokenCache.expiresAt) {
+    return sandboxTokenCache.token;
+  }
+  const authRes = await fetch('https://api.sandbox.co.in/authenticate', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'x-api-key': apiKey,
+      'x-api-secret': apiSecret || apiKey,
+      'x-api-version': '1.0',
+    },
+  });
+  if (!authRes.ok) throw new Error('Sandbox authentication failed');
+  const authData = await authRes.json();
+  const token = authData.access_token || authData.data?.access_token;
+  if (!token) throw new Error('No access token in Sandbox response');
+  sandboxTokenCache = { token, key: apiKey, expiresAt: Date.now() + 20 * 3600 * 1000 };
+  return token;
+}
+
+// v1.10.82 - GSTIN taxpayer resolver with GSP / live API provider integration
+app.get('/api/gstin-lookup/:gstin', async (req, res) => {
+  const gstin = String(req.params.gstin || '').trim().toUpperCase();
+  const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+  if (!gstinRegex.test(gstin)) {
+    return res.status(400).json({ ok: false, error: 'Invalid GSTIN format' });
+  }
+
+  // 1. Search local clients
+  const clients = readAllFromDir('clients');
+  const matchClient = clients.find((c) => String(c.gstin || '').trim().toUpperCase() === gstin);
+  if (matchClient) {
+    return res.json({
+      ok: true,
+      source: 'local_client',
+      taxpayer: {
+        gstin,
+        name: matchClient.name || '',
+        tradeName: matchClient.tradeName || matchClient.name || '',
+        address: matchClient.address || '',
+        city: matchClient.city || '',
+        pin: matchClient.pin || '',
+        state: matchClient.state || '',
+        status: 'Active (from database)',
+      },
+    });
+  }
+
+  // 2. Search local bills
+  const bills = readAllFromDir('bills');
+  const matchBill = bills.find((b) => {
+    const bg = String(b.data?.client?.gstin || b.clientGstin || '').trim().toUpperCase();
+    return bg === gstin;
+  });
+  if (matchBill) {
+    const bc = matchBill.data?.client || {};
+    return res.json({
+      ok: true,
+      source: 'local_bill',
+      taxpayer: {
+        gstin,
+        name: bc.name || matchBill.clientName || '',
+        tradeName: bc.tradeName || bc.name || '',
+        address: bc.address || '',
+        city: bc.city || '',
+        pin: bc.pin || '',
+        state: bc.state || '',
+        status: 'Active (from past bill)',
+      },
+    });
+  }
+
+  // 3. If user configured an external GSP / API Key in meta.json
+  const meta = readJSON(META_PATH, {});
+  const gstCfg = meta.gstApiConfig || {};
+  if (gstCfg.apiKey && gstCfg.apiKey.trim()) {
+    try {
+      const apiKey = gstCfg.apiKey.trim();
+      const provider = gstCfg.provider || 'sandbox';
+      let fetchUrl = '';
+      const fetchHeaders = { Accept: 'application/json' };
+
+      if (provider === 'sandbox') {
+        const token = await getSandboxAccessToken(apiKey, gstCfg.apiSecret);
+        fetchUrl = `https://api.sandbox.co.in/gsp/public/gstin/${encodeURIComponent(gstin)}`;
+        fetchHeaders['Authorization'] = token;
+        fetchHeaders['x-api-key'] = apiKey;
+        fetchHeaders['x-api-version'] = '1.0';
+      } else if (provider === 'mastersindia') {
+        fetchUrl = `https://api.mastersindia.co/commonapi/v1.2/search?action=TP&gstin=${encodeURIComponent(gstin)}`;
+        fetchHeaders['client_id'] = apiKey;
+      } else if (provider === 'custom' && gstCfg.customEndpoint) {
+        fetchUrl = gstCfg.customEndpoint.replace('{gstin}', encodeURIComponent(gstin));
+        fetchHeaders['Authorization'] = `Bearer ${apiKey}`;
+      }
+
+      if (fetchUrl) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const remoteRes = await fetch(fetchUrl, { headers: fetchHeaders, signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (remoteRes.ok) {
+          const remoteJson = await remoteRes.json();
+          const parsed = (remoteJson.data && remoteJson.data.taxpayer) || remoteJson.data || remoteJson;
+          return res.json({
+            ok: true,
+            source: 'gsp_remote',
+            taxpayer: parsed,
+          });
+        }
+      }
+    } catch {
+      // remote fetch failed or timed out, gracefully continue to fallback
+    }
+  }
+
+  // 4. Fallback: Offline structure
+  const stateCode = gstin.slice(0, 2);
+  const pan = gstin.slice(2, 12);
+  res.json({
+    ok: true,
+    source: 'offline_parsed',
+    taxpayer: {
+      gstin,
+      name: '',
+      pan,
+      stateCode,
+      status: 'Valid format',
+    },
+  });
+});
+
 // ========================
 // TERMS TEMPLATES
 // ========================

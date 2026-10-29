@@ -17,6 +17,7 @@ import PrintSettings from './PrintSettings';
 import HelpButton from './HelpButton';
 import AppLockSettings from './AppLockSettings';
 import InvoiceNumberSettings from './InvoiceNumberSettings';
+import GstApiSettingsPanel from './GstApiSettingsPanel';
 import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill, runUpdateNow, saveBill, applyStockChanges, getBackupFolder, setBackupFolder } from '../store';
 
 // v1.10.36 — Section order for the jump-nav pill bar. Keeping this at
@@ -25,6 +26,7 @@ import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedB
 const JUMP_NAV_SECTIONS = [
   ['section-company',  'Company'],
   ['section-profiles', 'Profiles'],
+  ['section-gstapi',   'GST Portal & API'],
   ['section-terms',    'Terms'],
   ['section-print',    'Print & PDF'],
   ['section-modules',  'Features'],
@@ -1549,6 +1551,11 @@ export default function SettingsView({ onSaved }) {
             })}
           </div>
         )}
+      </div>
+
+      {/* ---- GST Portal & API Gateway ---- */}
+      <div id="section-gstapi" style={{ order: 2.5 }}>
+        <GstApiSettingsPanel />
       </div>
 
       {/* ---- Cloud Backup ---- */}

@@ -1,6 +1,6 @@
-// v1.10.84 - Tally Prime & Tally ERP 9 XML Data Importer
+// v1.10.85 - Tally Prime & Tally ERP 9 XML Data Importer
 // Robust parsing for Masters (Ledgers & Stock) and Vouchers (Sales Invoices).
-// Handles UTF-16LE, control codes (&#4;), XML entities, addresses, and GSTIN state inference.
+// Handles UTF-16LE, control codes (&#4;), XML entities, duplicate detection & resolution (keep-both, replace, skip).
 import { getStateCode, stateNameForCode } from '../utils.js';
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -234,15 +234,18 @@ export function parseTallyMasterRegex(xmlText) {
 
 /**
  * Parses Tally Sales Vouchers XML (DayBook / Sales Register exports).
- * Extracts invoice numbers, dates, buyers, line items, taxes, and totals.
+ * Tracks raw voucher numbers and duplicate occurrences for user-guided resolution.
  *
  * @param {string} xmlText
+ * @param {Object} [options]
+ * @param {boolean} [options.autoSuffix=false] - If true, auto-suffixes duplicates during parse.
  * @returns {Object} { bills: Array, errors: Array }
  */
-export function parseTallySalesVouchersXml(xmlText) {
+export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false } = {}) {
   const cleanXml = sanitizeTallyXml(xmlText);
   const bills = [];
   const errors = [];
+  const seenNumbers = new Map();
 
   const vchMatches = cleanXml.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/gi);
   for (const match of vchMatches) {
@@ -256,15 +259,29 @@ export function parseTallySalesVouchersXml(xmlText) {
 
     if (!isSales && !isCreditNote) continue;
 
-    // Invoice number
-    const invNoM = body.match(/<VOUCHERNUMBER>([^<]+)<\/VOUCHERNUMBER>/i) || body.match(/<REFERENCE>([^<]+)<\/REFERENCE>/i);
-    const invoiceNumber = invNoM ? unescapeXml(invNoM[1].trim()) : '';
+    // Check if cancelled in Tally
+    const isCancelledM = body.match(/<ISCANCELLED>([^<]+)<\/ISCANCELLED>/i);
+    const isCancelled = isCancelledM && isCancelledM[1].trim().toLowerCase() === 'yes';
 
     // Date YYYYMMDD -> YYYY-MM-DD
     const dateM = body.match(/<DATE>(\d{4})(\d{2})(\d{2})<\/DATE>/i);
     const invoiceDate = dateM ? `${dateM[1]}-${dateM[2]}-${dateM[3]}` : '';
 
-    if (!invoiceNumber || !invoiceDate) continue;
+    // Invoice number
+    const invNoM = body.match(/<VOUCHERNUMBER>([^<]+)<\/VOUCHERNUMBER>/i) || body.match(/<REFERENCE>([^<]+)<\/REFERENCE>/i);
+    const rawInvNo = invNoM ? unescapeXml(invNoM[1].trim()) : '';
+
+    if (!rawInvNo || !invoiceDate) continue;
+
+    // Track duplicate occurrences within the file
+    const lowerKey = rawInvNo.toLowerCase();
+    const prevCount = seenNumbers.get(lowerKey) || 0;
+    const duplicateIndex = prevCount;
+    seenNumbers.set(lowerKey, prevCount + 1);
+
+    const invoiceNumber = (autoSuffix && duplicateIndex > 0)
+      ? `${rawInvNo}-${duplicateIndex}`
+      : rawInvNo;
 
     // Party details
     const partyNameM = body.match(/<PARTYNAME>([^<]+)<\/PARTYNAME>/i) ||
@@ -399,14 +416,18 @@ export function parseTallySalesVouchersXml(xmlText) {
       id: invoiceNumber,
       clientName: partyName,
       invoiceNumber,
+      rawInvoiceNumber: rawInvNo,
+      duplicateIndex,
+      isDuplicateInFile: duplicateIndex > 0,
       invoiceDate,
       invoiceType: docType,
       currency: 'INR',
       totalAmount: r2(computedTotal),
       totalTaxAmount: r2(cgst + sgst + igst + cess),
-      status: 'unpaid',
+      status: isCancelled ? 'cancelled' : 'unpaid',
       paidAmount: 0,
       payments: [],
+      originalTallyNumber: rawInvNo,
       importedFrom: 'tally-xml',
       importedAt: new Date().toISOString(),
       data: {
@@ -455,9 +476,10 @@ export function parseTallySalesVouchersXml(xmlText) {
  * Auto-detects whether the file contains Masters, Vouchers, or both.
  *
  * @param {string} xmlText
+ * @param {Object} [options]
  * @returns {Object} { isMaster: boolean, isVoucher: boolean, clients: Array, products: Array, bills: Array, errors: Array }
  */
-export function parseTallyXml(xmlText) {
+export function parseTallyXml(xmlText, options = {}) {
   const cleanXml = sanitizeTallyXml(xmlText);
   const isMaster = cleanXml.includes('<LEDGER') || cleanXml.includes('<STOCKITEM');
   const isVoucher = cleanXml.includes('<VOUCHER');
@@ -469,7 +491,7 @@ export function parseTallyXml(xmlText) {
     masters = parseTallyMasterXml(cleanXml);
   }
   if (isVoucher) {
-    vouchers = parseTallySalesVouchersXml(cleanXml);
+    vouchers = parseTallySalesVouchersXml(cleanXml, options);
   }
 
   return {
@@ -479,5 +501,142 @@ export function parseTallyXml(xmlText) {
     products: masters.products,
     bills: vouchers.bills,
     errors: [...masters.errors, ...vouchers.errors],
+  };
+}
+
+/**
+ * Analyzes incoming bills for duplicate invoice numbers within the file and against existing bills in DB.
+ *
+ * @param {Array} incomingBills - Parsed bills from XML
+ * @param {Array} existingBills - Bills currently saved in DB
+ * @returns {Object} Duplicate analysis report
+ */
+export function detectDuplicateInvoices(incomingBills = [], existingBills = []) {
+  const existingMap = new Map();
+  for (const b of existingBills) {
+    const key = (b.invoiceNumber || b.id || '').trim().toLowerCase();
+    if (key) existingMap.set(key, b);
+  }
+
+  const seenInFile = new Map();
+  let duplicatesInFileCount = 0;
+  let duplicatesInDbCount = 0;
+  const duplicateNumbers = new Set();
+
+  for (const b of incomingBills) {
+    const rawNo = (b.rawInvoiceNumber || b.invoiceNumber || b.id || '').trim();
+    const key = rawNo.toLowerCase();
+    if (!key) continue;
+
+    const countInFile = seenInFile.get(key) || 0;
+    if (countInFile > 0) {
+      duplicatesInFileCount++;
+      duplicateNumbers.add(rawNo);
+    }
+    seenInFile.set(key, countInFile + 1);
+
+    if (existingMap.has(key)) {
+      duplicatesInDbCount++;
+      duplicateNumbers.add(rawNo);
+    }
+  }
+
+  const totalDuplicates = duplicatesInFileCount + duplicatesInDbCount;
+  return {
+    hasDuplicates: totalDuplicates > 0,
+    duplicatesInFileCount,
+    duplicatesInDbCount,
+    totalDuplicates,
+    duplicateSample: Array.from(duplicateNumbers).slice(0, 5),
+  };
+}
+
+/**
+ * Resolves an individual bill's invoice number and overwrite status based on chosen strategy.
+ *
+ * @param {Object} bill - Incoming bill
+ * @param {Object} context - { strategy: 'keep-both'|'replace'|'skip', existingBillsMap: Map, usedInvNos: Set, seenInSession: Map }
+ * @returns {Object} { skip?: boolean, billToSave?: Object, shouldOverwrite?: boolean, actionTaken: 'new'|'suffixed'|'replaced'|'skipped' }
+ */
+export function resolveDuplicateBill(bill, context) {
+  const { strategy = 'keep-both', existingBillsMap = new Map(), usedInvNos = new Set(), seenInSession = new Map() } = context;
+
+  const rawNo = (bill.rawInvoiceNumber || bill.invoiceNumber || bill.id || '').trim();
+  const rawKey = rawNo.toLowerCase();
+
+  const isDuplicate = usedInvNos.has(rawKey) || (seenInSession.get(rawKey) || 0) > 0;
+  seenInSession.set(rawKey, (seenInSession.get(rawKey) || 0) + 1);
+
+  if (!isDuplicate) {
+    usedInvNos.add(rawKey);
+    return {
+      billToSave: {
+        ...bill,
+        id: rawNo,
+        invoiceNumber: rawNo,
+        data: {
+          ...bill.data,
+          details: {
+            ...(bill.data?.details || {}),
+            invoiceNumber: rawNo,
+          },
+        },
+      },
+      shouldOverwrite: false,
+      actionTaken: 'new',
+    };
+  }
+
+  // Duplicate resolution
+  if (strategy === 'skip') {
+    return { skip: true, actionTaken: 'skipped' };
+  }
+
+  if (strategy === 'replace') {
+    const existing = existingBillsMap.get(rawKey);
+    const targetId = existing?.id || rawNo;
+    const targetInvNo = existing?.invoiceNumber || rawNo;
+    return {
+      billToSave: {
+        ...bill,
+        id: targetId,
+        invoiceNumber: targetInvNo,
+        data: {
+          ...bill.data,
+          details: {
+            ...(bill.data?.details || {}),
+            invoiceNumber: targetInvNo,
+          },
+        },
+      },
+      shouldOverwrite: true,
+      actionTaken: 'replaced',
+    };
+  }
+
+  // Default: 'keep-both' -> find unique suffix
+  let suffix = 1;
+  let candidate = `${rawNo}-${suffix}`;
+  while (usedInvNos.has(candidate.toLowerCase())) {
+    suffix++;
+    candidate = `${rawNo}-${suffix}`;
+  }
+  usedInvNos.add(candidate.toLowerCase());
+
+  return {
+    billToSave: {
+      ...bill,
+      id: candidate,
+      invoiceNumber: candidate,
+      data: {
+        ...bill.data,
+        details: {
+          ...(bill.data?.details || {}),
+          invoiceNumber: candidate,
+        },
+      },
+    },
+    shouldOverwrite: false,
+    actionTaken: 'suffixed',
   };
 }

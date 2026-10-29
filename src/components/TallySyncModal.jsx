@@ -1,8 +1,8 @@
-// v1.10.84 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales
+// v1.10.85 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales
 import { useState } from 'react';
-import { X, Download, Upload, CheckCircle, Layers } from 'lucide-react';
+import { X, Download, Upload, CheckCircle, Layers, AlertTriangle } from 'lucide-react';
 import { exportToTallyXml } from '../utils/tallyExport.js';
-import { parseTallyXml } from '../utils/tallyImport.js';
+import { parseTallyXml, detectDuplicateInvoices, resolveDuplicateBill } from '../utils/tallyImport.js';
 import {
   saveClient, saveProduct, saveBill, getAllClients, getAllProducts,
   getAllBills, getAllPurchases, getAllReceipts, getProfile,
@@ -22,6 +22,8 @@ export default function TallySyncModal({ show, onClose }) {
   const [parsedData, setParsedData] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
   const [progressText, setProgressText] = useState('');
+  const [duplicateStrategy, setDuplicateStrategy] = useState('keep-both'); // 'keep-both' | 'replace' | 'skip'
+  const [duplicateInfo, setDuplicateInfo] = useState(null);
 
   if (!show) return null;
 
@@ -136,6 +138,18 @@ export default function TallySyncModal({ show, onClose }) {
         setParsedData(res);
         setProgressText('');
 
+        if (res.bills?.length) {
+          getAllBills().then((existing) => {
+            const dupInfo = detectDuplicateInvoices(res.bills, existing || []);
+            setDuplicateInfo(dupInfo);
+          }).catch(() => {
+            const dupInfo = detectDuplicateInvoices(res.bills, []);
+            setDuplicateInfo(dupInfo);
+          });
+        } else {
+          setDuplicateInfo(null);
+        }
+
         const totalItems = (res.clients?.length || 0) + (res.products?.length || 0) + (res.bills?.length || 0);
         if (totalItems === 0 && res.errors?.length) {
           toast(res.errors[0], 'error');
@@ -149,6 +163,14 @@ export default function TallySyncModal({ show, onClose }) {
 
   const handleRunImport = async () => {
     if (!parsedData) return;
+
+    if (duplicateInfo?.hasDuplicates && duplicateStrategy === 'replace') {
+      const ok = window.confirm(
+        'Warning: Replace is selected. This will overwrite existing bills in your database with matching invoice numbers. Are you sure you want to proceed?'
+      );
+      if (!ok) return;
+    }
+
     setIsImporting(true);
 
     try {
@@ -156,6 +178,8 @@ export default function TallySyncModal({ show, onClose }) {
       let productsCount = 0;
       let billsCount = 0;
       let skippedBills = 0;
+      let replacedBills = 0;
+      let suffixedBills = 0;
 
       // 1. Import Masters if present
       if (parsedData.clients?.length || parsedData.products?.length) {
@@ -191,36 +215,56 @@ export default function TallySyncModal({ show, onClose }) {
           getProfile().catch(() => ({})),
         ]);
 
-        const existingInvNos = new Set(existingBills.map((b) => (b.invoiceNumber || b.id || '').trim().toLowerCase()));
-        const productHsnMap = new Map(products.map((p) => [(p.name || '').trim().toLowerCase(), p.hsn]));
+        const existingBillsMap = new Map();
+        const usedInvNos = new Set();
+        for (const b of existingBills) {
+          const key = (b.invoiceNumber || b.id || '').trim().toLowerCase();
+          if (key) {
+            existingBillsMap.set(key, b);
+            usedInvNos.add(key);
+          }
+        }
 
+        const seenInSession = new Map();
+        const productHsnMap = new Map(products.map((p) => [(p.name || '').trim().toLowerCase(), p.hsn]));
         const totalBills = parsedData.bills.length;
+
         for (let i = 0; i < totalBills; i++) {
           const bill = parsedData.bills[i];
-          const invKey = (bill.invoiceNumber || '').trim().toLowerCase();
+          const res = resolveDuplicateBill(bill, {
+            strategy: duplicateStrategy,
+            existingBillsMap,
+            usedInvNos,
+            seenInSession,
+          });
 
-          if (existingInvNos.has(invKey)) {
+          if (res.skip) {
             skippedBills++;
             continue;
           }
 
+          if (res.actionTaken === 'replaced') {
+            replacedBills++;
+          } else if (res.actionTaken === 'suffixed') {
+            suffixedBills++;
+          }
+
           // Backfill line item HSN from inventory if missing and assign profile cleanly without mutating state
-          const updatedItems = (bill.data?.items || []).map((it) => ({
+          const updatedItems = (res.billToSave.data?.items || []).map((it) => ({
             ...it,
             hsn: it.hsn || productHsnMap.get((it.name || '').trim().toLowerCase()) || '',
           }));
 
           const billToSave = {
-            ...bill,
+            ...res.billToSave,
             data: {
-              ...bill.data,
+              ...res.billToSave.data,
               items: updatedItems,
               ...(profile ? { profile } : {}),
             },
           };
 
-          await saveBill(billToSave);
-          existingInvNos.add(invKey);
+          await saveBill(billToSave, { overwrite: res.shouldOverwrite });
           billsCount++;
 
           if (i % 25 === 0 || i === totalBills - 1) {
@@ -230,12 +274,19 @@ export default function TallySyncModal({ show, onClose }) {
       }
 
       const summaries = [];
-      if (billsCount > 0) summaries.push(`${billsCount} invoices (${skippedBills} skipped)`);
+      if (billsCount > 0) {
+        let detail = `${billsCount} invoices imported`;
+        if (suffixedBills > 0) detail += ` (${suffixedBills} duplicates auto-suffixed)`;
+        if (replacedBills > 0) detail += ` (${replacedBills} duplicates replaced)`;
+        if (skippedBills > 0) detail += ` (${skippedBills} duplicates skipped)`;
+        summaries.push(detail);
+      }
       if (clientsCount > 0) summaries.push(`${clientsCount} parties`);
       if (productsCount > 0) summaries.push(`${productsCount} products`);
 
       toast(`Successfully imported ${summaries.join(', ') || 'records'} from Tally!`, 'success', 6000);
       setParsedData(null);
+      setDuplicateInfo(null);
       setProgressText('');
       onClose();
     } catch (err) {
@@ -364,6 +415,104 @@ export default function TallySyncModal({ show, onClose }) {
                       • <strong>{parsedData.products.length}</strong> stock items with opening quantities found.
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {duplicateInfo?.hasDuplicates && (
+              <div style={{
+                background: 'rgba(245, 158, 11, 0.08)',
+                border: '1px solid rgba(245, 158, 11, 0.4)',
+                borderRadius: 8,
+                padding: '0.85rem',
+                marginBottom: '1rem',
+                fontSize: '0.82rem',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#b45309', fontWeight: 600, marginBottom: 4 }}>
+                  <AlertTriangle size={16} />
+                  <span>Duplicate Invoice Numbers Detected ({duplicateInfo.totalDuplicates})</span>
+                </div>
+                <p style={{ margin: '0 0 0.65rem 0', color: 'var(--text-secondary)', lineHeight: 1.45, fontSize: '0.78rem' }}>
+                  Some invoice numbers appear multiple times or match existing bills in your system (e.g. <strong>#{duplicateInfo.duplicateSample.join(', #')}</strong>). Please choose how you want to handle duplicates:
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 8,
+                    cursor: 'pointer',
+                    background: duplicateStrategy === 'keep-both' ? 'rgba(245, 158, 11, 0.14)' : 'transparent',
+                    border: duplicateStrategy === 'keep-both' ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid transparent',
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                  }}>
+                    <input
+                      type="radio"
+                      name="dupAction"
+                      value="keep-both"
+                      checked={duplicateStrategy === 'keep-both'}
+                      onChange={() => setDuplicateStrategy('keep-both')}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Keep Both (Recommended)</strong>
+                      <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                        Imports all invoices. Duplicate invoice numbers will be given a suffix (e.g., <code>1723-1</code>, <code>1723-2</code>) so no transactions or totals are lost.
+                      </div>
+                    </div>
+                  </label>
+
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 8,
+                    cursor: 'pointer',
+                    background: duplicateStrategy === 'replace' ? 'rgba(245, 158, 11, 0.14)' : 'transparent',
+                    border: duplicateStrategy === 'replace' ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid transparent',
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                  }}>
+                    <input
+                      type="radio"
+                      name="dupAction"
+                      value="replace"
+                      checked={duplicateStrategy === 'replace'}
+                      onChange={() => setDuplicateStrategy('replace')}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Replace Existing</strong>
+                      <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                        Overwrites existing bills in your database with the incoming records from this Tally file.
+                      </div>
+                    </div>
+                  </label>
+
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 8,
+                    cursor: 'pointer',
+                    background: duplicateStrategy === 'skip' ? 'rgba(245, 158, 11, 0.14)' : 'transparent',
+                    border: duplicateStrategy === 'skip' ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid transparent',
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                  }}>
+                    <input
+                      type="radio"
+                      name="dupAction"
+                      value="skip"
+                      checked={duplicateStrategy === 'skip'}
+                      onChange={() => setDuplicateStrategy('skip')}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Skip Duplicates</strong>
+                      <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                        Keeps existing records intact and ignores any invoice numbers that already exist.
+                      </div>
+                    </div>
+                  </label>
                 </div>
               </div>
             )}

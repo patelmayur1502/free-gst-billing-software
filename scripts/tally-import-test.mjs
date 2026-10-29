@@ -1,11 +1,12 @@
-// Unit test for tallyImport (v1.10.84)
+// Unit test for tallyImport (v1.10.85)
 import assert from 'node:assert/strict';
 import {
   parseTallyMasterRegex, parseTallyMasterXml, parseTallySalesVouchersXml,
   parseTallyXml, sanitizeTallyXml, unescapeXml,
+  detectDuplicateInvoices, resolveDuplicateBill,
 } from '../src/utils/tallyImport.js';
 
-console.log('[v1.10.84] Testing tallyImport...');
+console.log('[v1.10.85] Testing tallyImport...');
 
 // 1. Test unescapeXml & sanitizeTallyXml
 assert.equal(unescapeXml('A &amp; B &quot;Item&quot;'), 'A & B "Item"');
@@ -145,5 +146,43 @@ assert.equal(autoVch.bills.length, 1);
 const autoMaster = parseTallyXml(sampleTallyXml);
 assert.equal(autoMaster.isMaster, true);
 assert.equal(autoMaster.clients.length, 2);
+
+// 5. Test detectDuplicateInvoices and resolveDuplicateBill
+const incomingBills = [
+  { rawInvoiceNumber: 'INV-101', invoiceNumber: 'INV-101', id: 'INV-101' },
+  { rawInvoiceNumber: 'INV-101', invoiceNumber: 'INV-101', id: 'INV-101' },
+  { rawInvoiceNumber: 'INV-102', invoiceNumber: 'INV-102', id: 'INV-102' },
+];
+const existingBills = [
+  { invoiceNumber: 'INV-102', id: 'INV-102' },
+];
+
+const dupInfo = detectDuplicateInvoices(incomingBills, existingBills);
+assert.equal(dupInfo.hasDuplicates, true);
+assert.equal(dupInfo.duplicatesInFileCount, 1, '1 duplicate inside incoming file');
+assert.equal(dupInfo.duplicatesInDbCount, 1, '1 duplicate colliding with DB');
+
+// Test strategy: keep-both
+const usedNos = new Set(['inv-102']);
+const seenInSess = new Map();
+const res1 = resolveDuplicateBill(incomingBills[0], { strategy: 'keep-both', usedInvNos: usedNos, seenInSession: seenInSess });
+assert.equal(res1.actionTaken, 'new');
+assert.equal(res1.billToSave.invoiceNumber, 'INV-101');
+
+const res2 = resolveDuplicateBill(incomingBills[1], { strategy: 'keep-both', usedInvNos: usedNos, seenInSession: seenInSess });
+assert.equal(res2.actionTaken, 'suffixed');
+assert.equal(res2.billToSave.invoiceNumber, 'INV-101-1');
+
+// Test strategy: replace
+const existingMap = new Map([['inv-102', { id: 'inv-102-uuid', invoiceNumber: 'INV-102' }]]);
+const resReplace = resolveDuplicateBill(incomingBills[2], { strategy: 'replace', existingBillsMap: existingMap, usedInvNos: usedNos, seenInSession: seenInSess });
+assert.equal(resReplace.actionTaken, 'replaced');
+assert.equal(resReplace.shouldOverwrite, true);
+assert.equal(resReplace.billToSave.id, 'inv-102-uuid');
+
+// Test strategy: skip
+const resSkip = resolveDuplicateBill(incomingBills[2], { strategy: 'skip', existingBillsMap: existingMap, usedInvNos: usedNos, seenInSession: seenInSess });
+assert.equal(resSkip.actionTaken, 'skipped');
+assert.equal(resSkip.skip, true);
 
 console.log('✓ All tallyImport unit tests passed successfully!');

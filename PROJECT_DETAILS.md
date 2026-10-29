@@ -1,7 +1,7 @@
 # PROJECT DETAILS — MASTER ARCHITECTURAL INDEX
 
 > [!IMPORTANT]
-> This master document indexes the definitive three-part modular documentation for Free GST Billing Software (v1.10.83).
+> This master document indexes the definitive three-part modular documentation for Free GST Billing Software (v1.10.84).
 > To prevent instruction truncation, all project documentation is partitioned across three files, strictly respecting the **Antigravity 11,999-character ceiling** (< 9,500 safe limit).
 
 ---

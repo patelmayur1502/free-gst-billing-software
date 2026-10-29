@@ -1,9 +1,12 @@
-// v1.10.81 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import from Tally
+// v1.10.84 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales
 import { useState } from 'react';
-import { X, Download, Upload, CheckCircle, FileText, ArrowRight, Layers, ShieldCheck } from 'lucide-react';
+import { X, Download, Upload, CheckCircle, Layers } from 'lucide-react';
 import { exportToTallyXml } from '../utils/tallyExport.js';
-import { parseTallyMasterXml } from '../utils/tallyImport.js';
-import { saveClient, saveProduct, getAllClients, getAllProducts, getAllBills, getAllPurchases, getAllReceipts, getProfile } from '../store';
+import { parseTallyXml } from '../utils/tallyImport.js';
+import {
+  saveClient, saveProduct, saveBill, getAllClients, getAllProducts,
+  getAllBills, getAllPurchases, getAllReceipts, getProfile,
+} from '../store';
 import { localToday, belongsToProfile } from '../utils';
 import { toast } from './Toast';
 
@@ -18,6 +21,7 @@ export default function TallySyncModal({ show, onClose }) {
   // Import state
   const [parsedData, setParsedData] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [progressText, setProgressText] = useState('');
 
   if (!show) return null;
 
@@ -34,11 +38,10 @@ export default function TallySyncModal({ show, onClose }) {
       const activeProfile = profile || {};
       const compName = activeProfile.businessName || 'Business';
 
-      // Filter by profile & date period
       const today = localToday();
       const currentYear = parseInt(today.slice(0, 4), 10);
-      const currentMonth = today.slice(0, 7); // YYYY-MM
-      
+      const currentMonth = today.slice(0, 7);
+
       const filterByDate = (dateStr) => {
         if (!dateStr) return false;
         if (period === 'month') return dateStr.startsWith(currentMonth);
@@ -49,7 +52,6 @@ export default function TallySyncModal({ show, onClose }) {
           return dateStr.startsWith(lm);
         }
         if (period === 'fy') {
-          // Indian FY starts Apr 1
           const monthNum = parseInt(today.slice(5, 7), 10);
           const fyStartYear = monthNum >= 4 ? currentYear : currentYear - 1;
           const fyStart = `${fyStartYear}-04-01`;
@@ -114,7 +116,6 @@ export default function TallySyncModal({ show, onClose }) {
         const bytes = new Uint8Array(buffer);
         let text = '';
 
-        // Tally ERP 9 / Prime XML encoding detection (UTF-16LE with or without BOM, UTF-16BE, UTF-8)
         if (bytes[0] === 0xff && bytes[1] === 0xfe) {
           text = new TextDecoder('utf-16le').decode(buffer);
         } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
@@ -131,9 +132,12 @@ export default function TallySyncModal({ show, onClose }) {
           }
         }
 
-        const res = parseTallyMasterXml(text);
+        const res = parseTallyXml(text);
         setParsedData(res);
-        if (res.clients.length === 0 && res.products.length === 0 && res.errors?.length) {
+        setProgressText('');
+
+        const totalItems = (res.clients?.length || 0) + (res.products?.length || 0) + (res.bills?.length || 0);
+        if (totalItems === 0 && res.errors?.length) {
           toast(res.errors[0], 'error');
         }
       } catch (err) {
@@ -146,34 +150,93 @@ export default function TallySyncModal({ show, onClose }) {
   const handleRunImport = async () => {
     if (!parsedData) return;
     setIsImporting(true);
-    let clientsCount = 0;
-    let productsCount = 0;
 
     try {
-      const [existingClients, existingProducts] = await Promise.all([
-        getAllClients().catch(() => []),
-        getAllProducts().catch(() => []),
-      ]);
+      let clientsCount = 0;
+      let productsCount = 0;
+      let billsCount = 0;
+      let skippedBills = 0;
 
-      const clientNames = new Set(existingClients.map((c) => (c.name || '').trim().toLowerCase()));
-      const productNames = new Set(existingProducts.map((p) => (p.name || '').trim().toLowerCase()));
+      // 1. Import Masters if present
+      if (parsedData.clients?.length || parsedData.products?.length) {
+        setProgressText('Importing masters…');
+        const [existingClients, existingProducts] = await Promise.all([
+          getAllClients().catch(() => []),
+          getAllProducts().catch(() => []),
+        ]);
 
-      for (const c of parsedData.clients) {
-        if (!clientNames.has((c.name || '').trim().toLowerCase())) {
-          await saveClient(c);
-          clientsCount++;
+        const clientNames = new Set(existingClients.map((c) => (c.name || '').trim().toLowerCase()));
+        const productNames = new Set(existingProducts.map((p) => (p.name || '').trim().toLowerCase()));
+
+        for (const c of parsedData.clients || []) {
+          if (!clientNames.has((c.name || '').trim().toLowerCase())) {
+            await saveClient(c);
+            clientsCount++;
+          }
+        }
+
+        for (const p of parsedData.products || []) {
+          if (!productNames.has((p.name || '').trim().toLowerCase())) {
+            await saveProduct(p);
+            productsCount++;
+          }
         }
       }
 
-      for (const p of parsedData.products) {
-        if (!productNames.has((p.name || '').trim().toLowerCase())) {
-          await saveProduct(p);
-          productsCount++;
+      // 2. Import Sales Invoices if present
+      if (parsedData.bills?.length) {
+        const [existingBills, products, profile] = await Promise.all([
+          getAllBills().catch(() => []),
+          getAllProducts().catch(() => []),
+          getProfile().catch(() => ({})),
+        ]);
+
+        const existingInvNos = new Set(existingBills.map((b) => (b.invoiceNumber || b.id || '').trim().toLowerCase()));
+        const productHsnMap = new Map(products.map((p) => [(p.name || '').trim().toLowerCase(), p.hsn]));
+
+        const totalBills = parsedData.bills.length;
+        for (let i = 0; i < totalBills; i++) {
+          const bill = parsedData.bills[i];
+          const invKey = (bill.invoiceNumber || '').trim().toLowerCase();
+
+          if (existingInvNos.has(invKey)) {
+            skippedBills++;
+            continue;
+          }
+
+          // Backfill line item HSN from inventory if missing and assign profile cleanly without mutating state
+          const updatedItems = (bill.data?.items || []).map((it) => ({
+            ...it,
+            hsn: it.hsn || productHsnMap.get((it.name || '').trim().toLowerCase()) || '',
+          }));
+
+          const billToSave = {
+            ...bill,
+            data: {
+              ...bill.data,
+              items: updatedItems,
+              ...(profile ? { profile } : {}),
+            },
+          };
+
+          await saveBill(billToSave);
+          existingInvNos.add(invKey);
+          billsCount++;
+
+          if (i % 25 === 0 || i === totalBills - 1) {
+            setProgressText(`Importing invoices (${i + 1}/${totalBills})…`);
+          }
         }
       }
 
-      toast(`Imported ${clientsCount} new parties and ${productsCount} products from Tally!`, 'success', 6000);
+      const summaries = [];
+      if (billsCount > 0) summaries.push(`${billsCount} invoices (${skippedBills} skipped)`);
+      if (clientsCount > 0) summaries.push(`${clientsCount} parties`);
+      if (productsCount > 0) summaries.push(`${productsCount} products`);
+
+      toast(`Successfully imported ${summaries.join(', ') || 'records'} from Tally!`, 'success', 6000);
       setParsedData(null);
+      setProgressText('');
       onClose();
     } catch (err) {
       toast('Import failed: ' + err.message, 'error');
@@ -184,7 +247,7 @@ export default function TallySyncModal({ show, onClose }) {
 
   return (
     <div className="modal-overlay">
-      <div className="modal-content" style={{ maxWidth: '620px', padding: '1.5rem' }}>
+      <div className="modal-content" style={{ maxWidth: '640px', padding: '1.5rem' }}>
         <div className="flex justify-between items-center mb-4 pb-2" style={{ borderBottom: '1px solid var(--border-color, #e5e7eb)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Layers size={22} style={{ color: 'var(--primary)' }} />
@@ -207,7 +270,7 @@ export default function TallySyncModal({ show, onClose }) {
             className={activeTab === 'import' ? 'btn btn-primary' : 'btn btn-secondary'}
             onClick={() => setActiveTab('import')}
             style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Upload size={14} /> Import Tally Masters
+            <Upload size={14} /> Import Tally XML (Masters / Sales)
           </button>
         </div>
 
@@ -268,14 +331,14 @@ export default function TallySyncModal({ show, onClose }) {
         ) : (
           <div>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: 1.45 }}>
-              Migrate your existing Tally customers (Sundry Debtors & Creditors) and stock items into Free GST Billing Software.
+              Import your existing Tally data into Free GST Billing Software. Supports <strong>Master XML</strong> (parties & products) and <strong>Sales XML</strong> (invoices with line items & GST tax breakup).
             </p>
 
             <div style={{ background: 'var(--bg-secondary, #f9fafb)', border: '1px dashed var(--border-color, #d1d5db)', borderRadius: 8, padding: '1.25rem', textAlign: 'center', marginBottom: '1rem' }}>
               <Upload size={28} style={{ color: 'var(--primary)', margin: '0 auto 0.5rem auto' }} />
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 4 }}>Select Tally Master XML File</div>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 4 }}>Select Tally XML File (Masters or Sales)</div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-                In Tally: <em>Display &gt; List of Accounts &gt; Export (Alt+E) &gt; XML Format</em>
+                Supports <code>Master.xml</code>, <code>Sales.xml</code>, or <code>DayBook.xml</code> exported from Tally ERP 9 / Prime
               </div>
               <input type="file" accept=".xml" onChange={handleFileChange} style={{ fontSize: '0.8rem' }} />
             </div>
@@ -285,23 +348,41 @@ export default function TallySyncModal({ show, onClose }) {
                 <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                   <CheckCircle size={14} /> File analyzed successfully!
                 </div>
-                <div style={{ marginTop: 4 }}>
-                  • <strong>{parsedData.clients.length}</strong> parties (customers & suppliers) found.<br />
-                  • <strong>{parsedData.products.length}</strong> stock items with opening quantities found.
+                <div style={{ marginTop: 4, lineHeight: 1.6 }}>
+                  {parsedData.bills?.length > 0 && (
+                    <div>
+                      • <strong>{parsedData.bills.length}</strong> Sales Invoices found (Date range: <strong>{parsedData.bills[0].invoiceDate}</strong> to <strong>{parsedData.bills[parsedData.bills.length - 1].invoiceDate}</strong>).
+                    </div>
+                  )}
+                  {parsedData.clients?.length > 0 && (
+                    <div>
+                      • <strong>{parsedData.clients.length}</strong> parties (customers & suppliers) found.
+                    </div>
+                  )}
+                  {parsedData.products?.length > 0 && (
+                    <div>
+                      • <strong>{parsedData.products.length}</strong> stock items with opening quantities found.
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
-            <div className="flex justify-end gap-3">
-              <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={handleRunImport}
-                disabled={!parsedData || isImporting}
-                style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <CheckCircle size={15} /> {isImporting ? 'Importing…' : 'Import into Database'}
-              </button>
+            <div className="flex justify-between items-center">
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {progressText}
+              </span>
+              <div className="flex gap-3">
+                <button type="button" className="btn btn-secondary" onClick={onClose} disabled={isImporting}>Cancel</button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleRunImport}
+                  disabled={!parsedData || isImporting}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <CheckCircle size={15} /> {isImporting ? (progressText || 'Importing…') : 'Import into Database'}
+                </button>
+              </div>
             </div>
           </div>
         )}

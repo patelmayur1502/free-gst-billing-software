@@ -121,6 +121,8 @@ graph TD
   Static PWA deployed to Vercel CDN; backend transitioned to Supabase PostgreSQL with RLS and Supabase Auth.
 - **Option C (Cloudflare Tunnel)**:
   Zero-trust Cloudflare Tunnel forwarding requests to the local machine without opening router ports.
+- **Option D (Oracle Cloud Always-Free Compute VM)**:
+  Ubuntu 24.04 LTS instance (ap-mumbai-1) running Node.js 22 + PM2 daemon with systemd persistence. Ingress port 47371 open via VCN Security List and OS iptables; `HOST=0.0.0.0` environment variable for web listening.
 
 ---
 

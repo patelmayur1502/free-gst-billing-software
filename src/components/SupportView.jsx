@@ -86,7 +86,7 @@ export default function SupportView() {
         <div>
           <h3 style={{ margin: '0 0 0.4rem', fontSize: '1.05rem' }}>Free, and it stays free</h3>
           <p style={{ margin: 0, color: 'var(--text-secondary)', lineHeight: 1.6, maxWidth: '70ch' }}>
-            Free GST Billing is built and maintained by <b>DiceCodes</b> in India. No ads, no account, no locked features,
+            Free GST Billing is built and maintained by <b>Beellz Technologies</b> in India. No ads, no account, no locked features,
             and your invoices never leave this computer. If it saves you time every month, you can help keep the
             fixes and new features coming.
           </p>

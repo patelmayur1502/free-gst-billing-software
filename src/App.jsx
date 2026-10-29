@@ -822,7 +822,7 @@ function App() {
           </div>
           <div>
             <h2 className="sidebar-title">GST Billing</h2>
-            <p className="sidebar-subtitle">by DiceCodes</p>
+            <p className="sidebar-subtitle">by Beellz Technologies</p>
           </div>
           {/* Auto-hide as a ☰ button (was a text checkbox): pressed = the menu
               shrinks to icons and opens when pointed at. */}

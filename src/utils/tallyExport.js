@@ -121,6 +121,7 @@ function generateSalesVouchersXml(bills) {
       const iAmt = iQty * iRate;
       const itemTaxPct = item.taxPercent !== undefined ? Number(item.taxPercent) : Number(taxRate);
       const itemRateStr = Number.isInteger(itemTaxPct) ? String(itemTaxPct) : itemTaxPct.toFixed(1);
+      const itemHsn = (item.hsn || '').trim();
 
       const itemSalesLedger = isInterstate
         ? (itemTaxPct > 0 ? `IGST SALES ${itemRateStr}%` : 'Sales')
@@ -129,6 +130,13 @@ function generateSalesVouchersXml(bills) {
       vchXml += `
             <INVENTORYENTRIES.LIST>
               <STOCKITEMNAME>${escapeXml(item.name || 'Sales Item')}</STOCKITEMNAME>
+              ${itemHsn ? `<HSNCODE>${escapeXml(itemHsn)}</HSNCODE>
+              <GSTDETAILS.LIST>
+                <APPLICABLEFROM>${invDate}</APPLICABLEFROM>
+                <CALCULATIONTYPE>On Value</CALCULATIONTYPE>
+                <HSNCODE>${escapeXml(itemHsn)}</HSNCODE>
+                <TAXABILITY>Taxable</TAXABILITY>
+              </GSTDETAILS.LIST>` : ''}
               <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
               <RATE>${iRate.toFixed(2)}/${escapeXml(iUnit)}</RATE>
               <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>
@@ -144,6 +152,7 @@ function generateSalesVouchersXml(bills) {
               <ACCOUNTINGALLOCATIONS.LIST>
                 <LEDGERNAME>${escapeXml(itemSalesLedger)}</LEDGERNAME>
                 <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+                ${itemHsn ? `<GSTOVRDNHSNCODE>${escapeXml(itemHsn)}</GSTOVRDNHSNCODE>` : ''}
                 <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
                 <ISPARTYLEDGER>No</ISPARTYLEDGER>
                 <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>

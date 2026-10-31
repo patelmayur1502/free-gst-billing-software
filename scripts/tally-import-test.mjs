@@ -1,16 +1,26 @@
-// Unit test for tallyImport (v1.10.85)
+// Unit test for tallyImport (v1.10.87)
 import assert from 'node:assert/strict';
 import {
   parseTallyMasterRegex, parseTallyMasterXml, parseTallySalesVouchersXml,
   parseTallyXml, sanitizeTallyXml, unescapeXml,
   detectDuplicateInvoices, resolveDuplicateBill,
+  extractHsnFromXmlSnippet, normalizeItemKey,
 } from '../src/utils/tallyImport.js';
 
-console.log('[v1.10.85] Testing tallyImport...');
+console.log('[v1.10.87] Testing tallyImport...');
 
 // 1. Test unescapeXml & sanitizeTallyXml
 assert.equal(unescapeXml('A &amp; B &quot;Item&quot;'), 'A & B "Item"');
 assert.equal(sanitizeTallyXml('\uFEFF<TAG>&#4; Applicable\0</TAG>'), '<TAG> Applicable</TAG>');
+
+// 1.1 Test extractHsnFromXmlSnippet across diverse Tally schemas
+assert.equal(extractHsnFromXmlSnippet('<HSNCODE>84717020</HSNCODE>'), '84717020');
+assert.equal(extractHsnFromXmlSnippet('<HSNCODE TYPE="String">84717020</HSNCODE>'), '84717020');
+assert.equal(extractHsnFromXmlSnippet('<GSTDETAILS.LIST><HSNCODE>84717020</HSNCODE></GSTDETAILS.LIST>'), '84717020');
+assert.equal(extractHsnFromXmlSnippet('<ACCOUNTINGALLOCATIONS.LIST><GSTOVRDNHSNCODE>84717020</GSTOVRDNHSNCODE></ACCOUNTINGALLOCATIONS.LIST>'), '84717020');
+assert.equal(extractHsnFromXmlSnippet('<COMMODITYCODE>4202</COMMODITYCODE>'), '4202');
+assert.equal(extractHsnFromXmlSnippet('<HSNSACCODE>9965</HSNSACCODE>'), '9965');
+assert.equal(normalizeItemKey('18 " PVC Pipe 4 Inch'), '18 pvc pipe 4 inch');
 
 // 2. Test Masters parsing
 const sampleTallyXml = `
@@ -138,10 +148,42 @@ assert.equal(bill.data.items[0].hsn, '3917');
 assert.equal(bill.data.totals.cgst, 90);
 assert.equal(bill.data.totals.sgst, 90);
 
+// 3.1 Test Sales Voucher XML parsing when HSN is missing from voucher but provided via products
+const salesXmlWithoutHsn = sampleSalesXml.replace('<HSNCODE>3917</HSNCODE>', '');
+const resBackfilled = parseTallySalesVouchersXml(salesXmlWithoutHsn, {
+  products: [{ name: '18 " PVC Pipe 4 Inch', hsn: '3917' }],
+});
+assert.equal(resBackfilled.bills[0].data.items[0].hsn, '3917', 'Should backfill HSN from product catalog');
+
 // 4. Test Unified parseTallyXml auto-detection
 const autoVch = parseTallyXml(sampleSalesXml);
 assert.equal(autoVch.isVoucher, true);
 assert.equal(autoVch.bills.length, 1);
+
+// 4.1 Test combined XML with both StockItem and Voucher lacking HSN tag
+const combinedXml = `
+<ENVELOPE>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDATA>
+        <TALLYMESSAGE>
+          <STOCKITEM NAME="18 &quot; PVC Pipe 4 Inch">
+            <BASEUNITS>Mtrs</BASEUNITS>
+            <GSTDETAILS.LIST>
+              <HSNCODE>3917</HSNCODE>
+            </GSTDETAILS.LIST>
+          </STOCKITEM>
+        </TALLYMESSAGE>
+        ${sampleSalesXml.replace('<HSNCODE>3917</HSNCODE>', '')}
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>
+`;
+const autoCombined = parseTallyXml(combinedXml);
+assert.equal(autoCombined.isMaster, true);
+assert.equal(autoCombined.isVoucher, true);
+assert.equal(autoCombined.bills[0].data.items[0].hsn, '3917', 'Combined XML should populate HSN on vouchers from stock items in same file');
 
 const autoMaster = parseTallyXml(sampleTallyXml);
 assert.equal(autoMaster.isMaster, true);

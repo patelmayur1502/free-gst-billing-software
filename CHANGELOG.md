@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.87] - 2026-10-31
+
+### Fixed & Enhanced
+- **Tally XML Import HSN Code Auto-Detection & Backfilling**:
+  - Resolved blank HSN issue when importing Tally XML files into Free GST Billing Software.
+  - Added multi-tag HSN extraction in `extractHsnFromXmlSnippet`: parses `<HSNCODE>`, `<HSN>`, `<GSTOVRDNHSNCODE>`, `<COMMODITYCODE>`, `<HSNSACCODE>`, `<TARIFFCODE>`, `<UDF:HSNCODE>`, and nested `<GSTDETAILS.LIST>` or `<ACCOUNTINGALLOCATIONS.LIST>`, with full support for XML tag attributes (`TYPE="String"`, etc.).
+  - Added intelligent product-catalog backfilling: when voucher XML line items lack explicit HSN tags (as is standard in Tally DayBook / Voucher exports), stock item names are matched against known inventory products using both exact case-insensitive and normalized key matching (`normalizeItemKey`).
+  - Added support for combined XML exports containing both `<STOCKITEM>` masters and `<VOUCHER>` vouchers, backfilling line item HSN directly from parsed masters.
+  - Added **Sync HSN to Saved Bills** utility in `TallySyncModal`: scans existing bills in the database and automatically populates missing HSN codes from matching products in the catalog.
+  - Enhanced Tally XML export (`exportToTallyXml`) to explicitly embed `<HSNCODE>` inside `<INVENTORYENTRIES.LIST>` and `<GSTOVRDNHSNCODE>` inside `<ACCOUNTINGALLOCATIONS.LIST>`.
+
+---
+
 ## [1.10.86] - 2026-10-31
 
 ### Added

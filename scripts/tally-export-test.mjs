@@ -16,7 +16,7 @@ const mockBills = [
       details: { invoiceNumber: 'INV/26-27/001', invoiceDate: '2026-10-29', placeOfSupply: 'Maharashtra' },
       client: { name: 'Acme & Sons', gstin: '27AABCU9603R1ZX', address: 'Plot 4, MIDC, Andheri East, Mumbai' },
       items: [
-        { name: 'Widget A', quantity: 10, rate: 100, unit: 'Nos', taxPercent: 18 },
+        { name: 'Widget A', quantity: 10, rate: 100, unit: 'Nos', taxPercent: 18, hsn: '8471' },
       ],
       totals: {
         subtotal: 1000,
@@ -55,6 +55,8 @@ assert.ok(xml.includes('<PARTYLEDGERNAME>Acme &amp; Sons</PARTYLEDGERNAME>'), 'S
 assert.ok(xml.includes('<PARTYGSTIN>27AABCU9603R1ZX</PARTYGSTIN>'), 'Should include client GSTIN');
 assert.ok(xml.includes('<DATE>20261029</DATE>'), 'Should format date as YYYYMMDD');
 assert.ok(xml.includes('<INVENTORYENTRIES.LIST>'), 'Should have item inventory entries');
+assert.ok(xml.includes('<HSNCODE>8471</HSNCODE>'), 'Should export HSNCODE in inventory entry');
+assert.ok(xml.includes('<GSTOVRDNHSNCODE>8471</GSTOVRDNHSNCODE>'), 'Should export GSTOVRDNHSNCODE in accounting allocation');
 assert.ok(xml.includes('<BATCHALLOCATIONS.LIST>'), 'Should have batch allocations for Tally inventory');
 assert.ok(xml.includes('<ACCOUNTINGALLOCATIONS.LIST>'), 'Should have accounting allocation under inventory');
 assert.ok(xml.includes('<LEDGERNAME>GST SALES 18%</LEDGERNAME>'), 'Should map item to GST SALES 18% ledger');

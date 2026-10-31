@@ -51,6 +51,62 @@ function getTagText(element, tagName) {
 }
 
 /**
+ * Extracts text content of first tag from a list of candidate tag names.
+ * Iterates through all matching elements until a non-empty, non-trivial value is found.
+ */
+function getFirstTagText(element, tagNames = []) {
+  if (!element) return '';
+  for (const name of tagNames) {
+    const list = element.getElementsByTagName(name);
+    for (let i = 0; i < list.length; i++) {
+      const val = (list[i].textContent || '').trim();
+      if (val && !/^(applicable|not applicable|yes|no|none)$/i.test(val)) {
+        return val;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Robustly extracts an HSN or SAC code from an XML string snippet.
+ * Checks <HSNCODE>, <HSN>, <GSTOVRDNHSNCODE>, <COMMODITYCODE>, <HSNSACCODE>,
+ * <HSN_SAC_CODE>, <TARIFFCODE>, <TARIFFNAME>, <UDF:HSNCODE>, etc., with or without attributes,
+ * and handles nested <GSTDETAILS.LIST> or <ACCOUNTINGALLOCATIONS.LIST>.
+ */
+export function extractHsnFromXmlSnippet(snippet) {
+  if (!snippet) return '';
+  const patterns = [
+    /<(?:HSNCODE|HSN|GSTOVRDNHSNCODE|COMMODITYCODE|HSNSACCODE|HSN_SAC_CODE|TARIFFCODE|UDF:HSNCODE|UDF:HSN|UDF:HSN_CODE)\b[^>]*>([^<]+)<\/(?:HSNCODE|HSN|GSTOVRDNHSNCODE|COMMODITYCODE|HSNSACCODE|HSN_SAC_CODE|TARIFFCODE|UDF:HSNCODE|UDF:HSN|UDF:HSN_CODE)>/i,
+    /<GSTDETAILS\.LIST\b[^>]*>[\s\S]*?<(?:HSNCODE|HSN|GSTOVRDNHSNCODE|COMMODITYCODE)\b[^>]*>([^<]+)<\/(?:HSNCODE|HSN|GSTOVRDNHSNCODE|COMMODITYCODE)>/i,
+    /<ACCOUNTINGALLOCATIONS\.LIST\b[^>]*>[\s\S]*?<(?:HSNCODE|HSN|GSTOVRDNHSNCODE)\b[^>]*>([^<]+)<\/(?:HSNCODE|HSN|GSTOVRDNHSNCODE)>/i,
+    /<BATCHALLOCATIONS\.LIST\b[^>]*>[\s\S]*?<(?:HSNCODE|HSN)\b[^>]*>([^<]+)<\/(?:HSNCODE|HSN)>/i,
+  ];
+  for (const re of patterns) {
+    const m = snippet.match(re);
+    if (m && m[1] && m[1].trim()) {
+      const code = m[1].trim();
+      if (!/^(applicable|not applicable|yes|no|none)$/i.test(code)) {
+        return code;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Normalizes item/product names for fuzzy and whitespace-tolerant matching.
+ */
+export function normalizeItemKey(name) {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Parses Tally Masters XML (Ledgers & Stock Items).
  *
  * @param {string} xmlText
@@ -122,7 +178,7 @@ export function parseTallyMasterXml(xmlText) {
     const s = stockItems[i];
     const name = unescapeXml(s.getAttribute('NAME') || getTagText(s, 'NAME'));
     const unit = getTagText(s, 'BASEUNITS') || getTagText(s, 'BASEUNIT') || 'Nos';
-    const hsn = getTagText(s, 'HSNCODE') || getTagText(s, 'HSN');
+    const hsn = getFirstTagText(s, ['HSNCODE', 'HSN', 'COMMODITYCODE', 'HSNSACCODE', 'TARIFFCODE', 'GSTOVRDNHSNCODE']);
     const openingBalStr = getTagText(s, 'OPENINGBALANCE');
     const openingRateStr = getTagText(s, 'OPENINGRATE');
 
@@ -210,17 +266,17 @@ export function parseTallyMasterRegex(xmlText) {
     const body = match[1];
 
     const nameM = fullTag.match(/NAME="([^"]+)"/i) || body.match(/<NAME>([^<]+)<\/NAME>/i);
-    const unitM = body.match(/<(?:BASEUNITS|BASEUNIT)>([^<]+)<\/(?:BASEUNITS|BASEUNIT)>/i);
-    const hsnM = body.match(/<(?:HSNCODE|HSN)>([^<]+)<\/(?:HSNCODE|HSN)>/i);
-    const balM = body.match(/<OPENINGBALANCE>([^<]+)<\/OPENINGBALANCE>/i);
-    const rateM = body.match(/<OPENINGRATE>([^<]+)<\/OPENINGRATE>/i);
+    const unitM = body.match(/<(?:BASEUNITS|BASEUNIT)\b[^>]*>([^<]+)<\/(?:BASEUNITS|BASEUNIT)>/i);
+    const hsn = extractHsnFromXmlSnippet(body);
+    const balM = body.match(/<OPENINGBALANCE\b[^>]*>([^<]+)<\/OPENINGBALANCE>/i);
+    const rateM = body.match(/<OPENINGRATE\b[^>]*>([^<]+)<\/OPENINGRATE>/i);
 
     const rawName = nameM ? nameM[1].trim() : '';
     if (rawName) {
       products.push({
         id: 'prd_' + Math.random().toString(36).slice(2, 9),
         name: unescapeXml(rawName),
-        hsn: hsnM ? hsnM[1].trim() : '',
+        hsn: hsn || '',
         unit: unitM ? unitM[1].trim() : 'Nos',
         rate: rateM ? parseFloat(rateM[1]) || 0 : 0,
         stock: balM ? parseFloat(balM[1]) || 0 : 0,
@@ -241,11 +297,23 @@ export function parseTallyMasterRegex(xmlText) {
  * @param {boolean} [options.autoSuffix=false] - If true, auto-suffixes duplicates during parse.
  * @returns {Object} { bills: Array, errors: Array }
  */
-export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false } = {}) {
+export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false, products = [] } = {}) {
   const cleanXml = sanitizeTallyXml(xmlText);
   const bills = [];
   const errors = [];
   const seenNumbers = new Map();
+
+  // Fast HSN lookup map from known products (exact lower + normalized key)
+  const productHsnMap = new Map();
+  for (const p of products) {
+    if (p && p.name && p.hsn) {
+      const code = String(p.hsn).trim();
+      if (code) {
+        productHsnMap.set(p.name.trim().toLowerCase(), code);
+        productHsnMap.set(normalizeItemKey(p.name), code);
+      }
+    }
+  }
 
   const vchMatches = cleanXml.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/gi);
   for (const match of vchMatches) {
@@ -350,15 +418,21 @@ export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false } = {})
 
     // Inventory line items
     const items = [];
-    const invMatches = [...body.matchAll(/<(?:INVENTORYENTRIES|ALLINVENTORYENTRIES)\.LIST>([\s\S]*?)<\/(?:INVENTORYENTRIES|ALLINVENTORYENTRIES)\.LIST>/gi)];
+    const invMatches = [...body.matchAll(/<(?:INVENTORYENTRIES|ALLINVENTORYENTRIES|INVENTORYENTRIESIN|INVENTORYENTRIESOUT)\.LIST\b[^>]*>([\s\S]*?)<\/(?:INVENTORYENTRIES|ALLINVENTORYENTRIES|INVENTORYENTRIESIN|INVENTORYENTRIESOUT)\.LIST>/gi)];
 
     for (const ie of invMatches) {
-      const stockItemM = ie[1].match(/<STOCKITEMNAME>([^<]+)<\/STOCKITEMNAME>/i);
-      const rateM = ie[1].match(/<RATE>([^<]+)<\/RATE>/i);
-      const billedQtyM = ie[1].match(/<BILLEDQTY>([^<]+)<\/BILLEDQTY>/i) || ie[1].match(/<ACTUALQTY>([^<]+)<\/ACTUALQTY>/i);
-      const amtM = ie[1].match(/<AMOUNT>([^<]+)<\/AMOUNT>/i);
-      const discountM = ie[1].match(/<DISCOUNT>([^<]+)<\/DISCOUNT>/i);
-      const hsnM = ie[1].match(/<HSNCODE>([^<]+)<\/HSNCODE>/i) || ie[1].match(/<HSN>([^<]+)<\/HSN>/i);
+      const stockItemM = ie[1].match(/<STOCKITEMNAME\b[^>]*>([^<]+)<\/STOCKITEMNAME>/i);
+      const rateM = ie[1].match(/<RATE\b[^>]*>([^<]+)<\/RATE>/i);
+      const billedQtyM = ie[1].match(/<BILLEDQTY\b[^>]*>([^<]+)<\/BILLEDQTY>/i) || ie[1].match(/<ACTUALQTY\b[^>]*>([^<]+)<\/ACTUALQTY>/i);
+      const amtM = ie[1].match(/<AMOUNT\b[^>]*>([^<]+)<\/AMOUNT>/i);
+      const discountM = ie[1].match(/<DISCOUNT\b[^>]*>([^<]+)<\/DISCOUNT>/i);
+
+      const rawItemName = stockItemM ? unescapeXml(stockItemM[1].trim()) : 'Item';
+      let hsn = extractHsnFromXmlSnippet(ie[1]);
+      if (!hsn && rawItemName) {
+        hsn = productHsnMap.get(rawItemName.toLowerCase()) ||
+              productHsnMap.get(normalizeItemKey(rawItemName)) || '';
+      }
 
       let quantity = 1;
       let unit = 'Nos';
@@ -381,8 +455,8 @@ export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false } = {})
 
       items.push({
         id: 'item_' + Math.random().toString(36).slice(2, 7),
-        name: stockItemM ? unescapeXml(stockItemM[1].trim()) : 'Item',
-        hsn: hsnM ? hsnM[1].trim() : '',
+        name: rawItemName,
+        hsn,
         quantity,
         unit,
         rate: rate || (quantity > 0 ? r2(lineAmt / quantity) : 0),
@@ -395,10 +469,11 @@ export function parseTallySalesVouchersXml(xmlText, { autoSuffix = false } = {})
     // Fallback if no inventory entries (service / lumpsum invoice)
     if (items.length === 0) {
       const taxable = partyTotal > 0 ? (partyTotal - (cgst + sgst + igst + cess + roundOff)) : 0;
+      const serviceHsn = extractHsnFromXmlSnippet(body);
       items.push({
         id: 'item_srv_1',
         name: 'Sales / Service',
-        hsn: '',
+        hsn: serviceHsn || '',
         quantity: 1,
         unit: 'Nos',
         rate: r2(taxable),
@@ -491,7 +566,8 @@ export function parseTallyXml(xmlText, options = {}) {
     masters = parseTallyMasterXml(cleanXml);
   }
   if (isVoucher) {
-    vouchers = parseTallySalesVouchersXml(cleanXml, options);
+    const allProducts = [...(options.products || []), ...(masters.products || [])];
+    vouchers = parseTallySalesVouchersXml(cleanXml, { ...options, products: allProducts });
   }
 
   return {

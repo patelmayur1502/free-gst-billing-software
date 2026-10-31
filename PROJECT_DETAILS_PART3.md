@@ -113,7 +113,7 @@ src/
 │   ├── BillOCR.jsx           # Tesseract.js scanner for supplier bills
 │   ├── BulkCsvImport.jsx     # Bulk import/export for sales & purchase invoices
 │   ├── Dashboard.jsx         # Invoices list, quick filters, bulk actions (Export XML, Export JSON, Bulk PDF)
-│   ├── TallySyncModal.jsx    # Tally XML export for CA & import with duplicate resolution (keep-both, replace, skip)
+│   ├── TallySyncModal.jsx    # Tally XML export for CA & import with HSN auto-detection & duplicate resolution
 │   ├── StockReport.jsx       # Closing stock valuation & item movement ledger (In/Out)
 │   ├── ControlPanel.jsx      # Embedded desktop server management
 │   ├── AppLock.jsx           # PIN lock screen overlay

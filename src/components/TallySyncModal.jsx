@@ -1,8 +1,8 @@
-// v1.10.85 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales
+// v1.10.87 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales with HSN code auto-detection
 import { useState } from 'react';
-import { X, Download, Upload, CheckCircle, Layers, AlertTriangle } from 'lucide-react';
+import { X, Download, Upload, CheckCircle, Layers, AlertTriangle, RefreshCw } from 'lucide-react';
 import { exportToTallyXml } from '../utils/tallyExport.js';
-import { parseTallyXml, detectDuplicateInvoices, resolveDuplicateBill } from '../utils/tallyImport.js';
+import { parseTallyXml, detectDuplicateInvoices, resolveDuplicateBill, normalizeItemKey } from '../utils/tallyImport.js';
 import {
   saveClient, saveProduct, saveBill, getAllClients, getAllProducts,
   getAllBills, getAllPurchases, getAllReceipts, getProfile,
@@ -21,6 +21,7 @@ export default function TallySyncModal({ show, onClose }) {
   // Import state
   const [parsedData, setParsedData] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSyncingHsn, setIsSyncingHsn] = useState(false);
   const [progressText, setProgressText] = useState('');
   const [duplicateStrategy, setDuplicateStrategy] = useState('keep-both'); // 'keep-both' | 'replace' | 'skip'
   const [duplicateInfo, setDuplicateInfo] = useState(null);
@@ -112,7 +113,7 @@ export default function TallySyncModal({ show, onClose }) {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const buffer = evt.target.result;
         const bytes = new Uint8Array(buffer);
@@ -134,7 +135,8 @@ export default function TallySyncModal({ show, onClose }) {
           }
         }
 
-        const res = parseTallyXml(text);
+        const existingProducts = await getAllProducts().catch(() => []);
+        const res = parseTallyXml(text, { products: existingProducts });
         setParsedData(res);
         setProgressText('');
 
@@ -226,7 +228,17 @@ export default function TallySyncModal({ show, onClose }) {
         }
 
         const seenInSession = new Map();
-        const productHsnMap = new Map(products.map((p) => [(p.name || '').trim().toLowerCase(), p.hsn]));
+        const allKnownProducts = [...(products || []), ...(parsedData.products || [])];
+        const productHsnMap = new Map();
+        for (const p of allKnownProducts) {
+          if (p && p.name && p.hsn) {
+            const code = String(p.hsn).trim();
+            if (code) {
+              productHsnMap.set(p.name.trim().toLowerCase(), code);
+              productHsnMap.set(normalizeItemKey(p.name), code);
+            }
+          }
+        }
         const totalBills = parsedData.bills.length;
 
         for (let i = 0; i < totalBills; i++) {
@@ -250,10 +262,15 @@ export default function TallySyncModal({ show, onClose }) {
           }
 
           // Backfill line item HSN from inventory if missing and assign profile cleanly without mutating state
-          const updatedItems = (res.billToSave.data?.items || []).map((it) => ({
-            ...it,
-            hsn: it.hsn || productHsnMap.get((it.name || '').trim().toLowerCase()) || '',
-          }));
+          const updatedItems = (res.billToSave.data?.items || []).map((it) => {
+            const rawName = (it.name || '').trim();
+            const fallbackHsn = productHsnMap.get(rawName.toLowerCase()) ||
+                                productHsnMap.get(normalizeItemKey(rawName)) || '';
+            return {
+              ...it,
+              hsn: it.hsn || fallbackHsn,
+            };
+          });
 
           const billToSave = {
             ...res.billToSave,
@@ -293,6 +310,92 @@ export default function TallySyncModal({ show, onClose }) {
       toast('Import failed: ' + err.message, 'error');
     } finally {
       setIsImporting(false);
+    }
+  };
+
+  const handleSyncExistingHsn = async () => {
+    setIsSyncingHsn(true);
+    setProgressText('Scanning saved bills for missing HSN codes…');
+    try {
+      const [bills, products] = await Promise.all([
+        getAllBills().catch(() => []),
+        getAllProducts().catch(() => []),
+      ]);
+
+      if (!bills.length) {
+        toast('No saved bills found in database', 'info');
+        setIsSyncingHsn(false);
+        setProgressText('');
+        return;
+      }
+
+      if (!products.length) {
+        toast('No products found with HSN codes in product catalog', 'warning');
+        setIsSyncingHsn(false);
+        setProgressText('');
+        return;
+      }
+
+      const productHsnMap = new Map();
+      for (const p of products) {
+        if (p && p.name && p.hsn) {
+          const code = String(p.hsn).trim();
+          if (code) {
+            productHsnMap.set(p.name.trim().toLowerCase(), code);
+            productHsnMap.set(normalizeItemKey(p.name), code);
+          }
+        }
+      }
+
+      let updatedCount = 0;
+      let itemsFilled = 0;
+
+      for (let i = 0; i < bills.length; i++) {
+        const b = bills[i];
+        const items = b.data?.items || b.items || [];
+        let billModified = false;
+
+        const newItems = items.map((it) => {
+          if (!it.hsn || !String(it.hsn).trim()) {
+            const rawName = (it.name || '').trim();
+            const matched = productHsnMap.get(rawName.toLowerCase()) ||
+                            productHsnMap.get(normalizeItemKey(rawName));
+            if (matched) {
+              billModified = true;
+              itemsFilled++;
+              return { ...it, hsn: matched };
+            }
+          }
+          return it;
+        });
+
+        if (billModified) {
+          const updatedBill = {
+            ...b,
+            data: {
+              ...(b.data || {}),
+              items: newItems,
+            },
+          };
+          await saveBill(updatedBill, { overwrite: true });
+          updatedCount++;
+        }
+
+        if (i % 25 === 0 || i === bills.length - 1) {
+          setProgressText(`Syncing HSN codes (${i + 1}/${bills.length})…`);
+        }
+      }
+
+      if (updatedCount > 0) {
+        toast(`Synced HSN codes! Updated ${itemsFilled} item(s) across ${updatedCount} bill(s).`, 'success', 6000);
+      } else {
+        toast('All bills already have matching HSN codes or no unmatched items found.', 'info');
+      }
+    } catch (err) {
+      toast('Failed to sync HSN: ' + err.message, 'error');
+    } finally {
+      setIsSyncingHsn(false);
+      setProgressText('');
     }
   };
 
@@ -392,6 +495,36 @@ export default function TallySyncModal({ show, onClose }) {
                 Supports <code>Master.xml</code>, <code>Sales.xml</code>, or <code>DayBook.xml</code> exported from Tally ERP 9 / Prime
               </div>
               <input type="file" accept=".xml" onChange={handleFileChange} style={{ fontSize: '0.8rem' }} />
+            </div>
+
+            <div style={{
+              background: 'rgba(59, 130, 246, 0.05)',
+              border: '1px solid rgba(59, 130, 246, 0.2)',
+              borderRadius: 6,
+              padding: '0.65rem 0.85rem',
+              marginBottom: '1rem',
+              fontSize: '0.78rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+              <div>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>HSN Code Auto-Detection</span>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.74rem' }}>
+                  Extracts HSN from XML tags and automatically backfills from your product catalog.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleSyncExistingHsn}
+                disabled={isSyncingHsn || isImporting}
+                style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}
+                title="Scan all existing saved bills and auto-fill missing HSN codes from matching products in your inventory">
+                <RefreshCw size={12} className={isSyncingHsn ? 'spin' : ''} />
+                {isSyncingHsn ? 'Syncing…' : 'Sync HSN to Saved Bills'}
+              </button>
             </div>
 
             {parsedData && (

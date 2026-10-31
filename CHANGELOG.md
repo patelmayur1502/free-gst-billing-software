@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.86] - 2026-10-31
+
+### Added
+- **1-Click Tally ERP 9 XML Voucher Export for Selected Bills**:
+  - Added **Export XML** button in the Dashboard selection toolbar to export selected bills directly into Tally ERP 9 / TallyPrime XML voucher import format (`<ENVELOPE>...<VOUCHER>...`).
+  - Added **Export Tally XML** in the row-level Actions (`⋯`) menu for single-click voucher export without needing multi-selection.
+  - Matches native Tally ERP 9 voucher export schema (as verified against `sales.xml`):
+    - Full Buyer & Consignee details with GSTIN, State, Place of Supply, and multi-line Addresses (`<ADDRESS.LIST>`, `<BASICBUYERADDRESS.LIST>`).
+    - Standard party ledger debit allocation (`<ISPARTYLEDGER>Yes</ISPARTYLEDGER>`, `<BILLALLOCATIONS.LIST>` with `<BILLTYPE>New Ref</BILLTYPE>`).
+    - Inventory item entries (`<INVENTORYENTRIES.LIST>`) with `<BATCHALLOCATIONS.LIST>` and nested `<ACCOUNTINGALLOCATIONS.LIST>` mapped to statutory rate-wise sales ledgers (`GST SALES 18%`, `IGST SALES 18%`, etc.).
+    - Output GST duty ledgers formatted with rates (`OUTPUT CGST 9%`, `OUTPUT SGST 9%`, `OUTPUT IGST 18%`, `ROUND OF`).
+    - Automatic fallback for lumpsum/service invoices without item inventories.
+
+---
+
 ## [1.10.80] - 2026-10-24
 
 **Bulk CSV import / export, a Lock button, View + a tidier Actions menu,

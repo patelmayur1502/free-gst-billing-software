@@ -4,6 +4,7 @@ import HelpButton from './HelpButton';
 import { getAllBills, saveBill, getAllProducts, applyStockChanges, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts, markSavedPdfCancelled } from '../store';
 import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile, salesSign, isCancelledBill, markPaidPatch, markUnpaidPatch, stockEffect, appliedStock, stockDelta, SALES_INVOICE_TYPES, localToday, amountDue, paymentStatusFor } from '../utils';
 import { openWhatsAppShare } from '../utils/share';
+import { exportToTallyXml } from '../utils/tallyExport.js';
 import PageHeader from './PageHeader';
 import LockButton from './LockButton';
 import ActionsMenu from './ActionsMenu';
@@ -886,6 +887,70 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
     toast(`Exported ${sel.length} invoice${sel.length !== 1 ? 's' : ''} as JSON`, 'success');
   };
 
+  const bulkExportXML = () => {
+    const sel = getSelectedBills();
+    if (sel.length === 0) return;
+
+    const validBills = sel.filter((b) => !isCancelledBill(b));
+    if (validBills.length === 0) {
+      toast('Selected invoice(s) are cancelled and cannot be exported to Tally', 'warning');
+      return;
+    }
+
+    const compName = profileState?.businessName || sel[0]?.data?.profile?.businessName || 'Galaxy Enterprises';
+    const xml = exportToTallyXml({
+      companyName: compName,
+      bills: validBills,
+      purchases: [],
+      receipts: [],
+    });
+
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    if (validBills.length === 1) {
+      const invNo = validBills[0].data?.details?.invoiceNumber || validBills[0].invoiceNumber || 'Voucher';
+      const safeNo = String(invNo).replace(/[^a-zA-Z0-9_-]/g, '_');
+      a.download = `Tally-Voucher-${safeNo}.xml`;
+    } else {
+      const today = localToday();
+      a.download = `Tally-Vouchers-${validBills.length}-invoices-${today}.xml`;
+    }
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`Exported ${validBills.length} invoice${validBills.length !== 1 ? 's' : ''} for Tally ERP 9`, 'success');
+  };
+
+  const exportSingleBillTallyXML = (bill) => {
+    if (!bill) return;
+    if (isCancelledBill(bill)) {
+      toast('Cancelled invoice cannot be exported to Tally', 'warning');
+      return;
+    }
+    const compName = profileState?.businessName || bill.data?.profile?.businessName || 'Galaxy Enterprises';
+    const xml = exportToTallyXml({
+      companyName: compName,
+      bills: [bill],
+      purchases: [],
+      receipts: [],
+    });
+    const invNo = bill.data?.details?.invoiceNumber || bill.invoiceNumber || 'Voucher';
+    const safeNo = String(invNo).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Tally-Voucher-${safeNo}.xml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`Exported ${invNo} for Tally ERP 9`, 'success');
+  };
+
   // Bulk PDF export — feature C from the v1.6.7 audit ("All March invoices
    // as one zip"). Renders each selected bill through the existing
    // InvoicePreview → jsPDF pipeline (see openBillPDF in this file's edit
@@ -1519,6 +1584,8 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}><AlertTriangle size={13} /> Mark overdue</button>
             <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkExportJSON}
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}><FileText size={13} /> Export JSON</button>
+            <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkExportXML}
+              style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }} title="Export selected invoice(s) as Tally ERP 9 compatible XML voucher file"><Download size={13} /> Export XML</button>
             <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={() => bulkExportPDF()}
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }} title="Combine selected invoices into one multi-page PDF — CAs love this for filing archives"><Download size={13} /> Bulk PDF</button>
             {/* v1.10.7 — Cancel button for the in-flight bulk export. The
@@ -1662,6 +1729,8 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                           <ActionsMenu label={`More actions for ${bill.invoiceNumber}`} items={[
                             { label: 'Duplicate', icon: Copy, onClick: () => onDuplicate(bill) },
                             { label: 'Print', icon: Printer, onClick: () => onPrint(bill), hidden: readOnly },
+                            { label: 'Export Tally XML', icon: Download, onClick: () => exportSingleBillTallyXML(bill), hidden: readOnly || isCancelledBill(bill),
+                              title: 'Export this voucher as Tally ERP 9 compatible XML file' },
                             { label: 'WhatsApp', icon: MessageCircle, tone: 'green', onClick: () => shareWhatsApp(bill), hidden: readOnly,
                               title: 'Share via WhatsApp — PDF attaches on mobile Chrome/Safari. On desktop it sends the invoice as text only (browser can\'t attach files to WhatsApp Web — security limitation, not our app).' },
                             // v1.10.12 — reminder for unpaid, partial and overdue bills.

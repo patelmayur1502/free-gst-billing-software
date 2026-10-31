@@ -1,7 +1,7 @@
-// v1.10.81 - Tally Prime & Tally ERP 9 XML Export Engine
-// Generates standard Tally-compatible XML (<ENVELOPE>...<VOUCHER>...)
+// v1.10.86 - Tally Prime & Tally ERP 9 XML Export Engine
+// Generates standard Tally ERP 9 compatible XML (<ENVELOPE>...<VOUCHER>...)
 // for Sales Invoices, Purchases, Credit Notes, and Payment Receipts
-// with Agst Ref bill allocations.
+// with Agst Ref bill allocations and Inventory Allocations.
 
 import { isCancelledBill } from '../utils.js';
 
@@ -27,18 +27,27 @@ export function toTallyDate(dateStr) {
 }
 
 /**
- * Generates Tally XML for a list of sales bills.
+ * Generates Tally XML for a list of sales bills matching Tally ERP 9 format.
  */
 function generateSalesVouchersXml(bills) {
   const vouchers = [];
 
   for (const b of bills) {
-    if (!b || !b.data || isCancelledBill(b)) continue;
-    const invNo = b.data.details?.invoiceNumber || b.invoiceNumber || 'INV';
-    const invDate = toTallyDate(b.data.details?.invoiceDate || b.invoiceDate);
-    const clientName = b.data.client?.name || b.clientName || 'Cash';
-    const pos = b.data.details?.placeOfSupply || b.data.client?.state || '';
-    const totals = b.data.totals || {};
+    if (!b || isCancelledBill(b)) continue;
+    const data = b.data || b;
+    const details = data.details || {};
+    const client = data.client || {};
+    const totals = data.totals || {};
+    const items = data.items || [];
+
+    const invNo = details.invoiceNumber || b.invoiceNumber || 'INV';
+    const invDate = toTallyDate(details.invoiceDate || b.invoiceDate);
+    const clientName = client.name || b.clientName || 'Cash';
+    const clientGstin = (client.gstin || '').toUpperCase();
+    const pos = details.placeOfSupply || client.state || '';
+    const clientState = client.state || pos;
+    const clientAddress = client.address || '';
+
     const totalAmount = Number(totals.total || b.totalAmount || 0);
     const taxableAmount = Number(totals.subtotal || totals.taxableAmount || 0);
     const cgst = Number(totals.cgst || 0);
@@ -46,8 +55,20 @@ function generateSalesVouchersXml(bills) {
     const igst = Number(totals.igst || 0);
     const cess = Number(totals.cess || 0);
     const roundOff = Number(totals.roundOff || 0);
-    const isCreditNote = b.data.invoiceType === 'credit-note';
+    const isCreditNote = (data.invoiceType || b.invoiceType) === 'credit-note';
     const vchType = isCreditNote ? 'Credit Note' : 'Sales';
+    const isInterstate = igst > 0;
+
+    const guid = b.id || `inv-${invNo}-${invDate}`;
+    const narration = data.customNotes || `${vchType} ${invNo}`;
+
+    // Calculate effective tax rate
+    const detectedTaxRate = items[0]?.taxPercent
+      ? Number(items[0].taxPercent)
+      : (taxableAmount > 0 ? Math.round(((cgst + sgst + igst) / taxableAmount) * 100) : 18) || 18;
+    const taxRate = Number.isInteger(detectedTaxRate) ? String(detectedTaxRate) : detectedTaxRate.toFixed(1);
+    const halfNum = Number(taxRate) / 2;
+    const halfRate = Number.isInteger(halfNum) ? String(halfNum) : halfNum.toFixed(1);
 
     // In Tally XML:
     // For Sales: Party is DEBIT (ISDEEMEDPOSITIVE=Yes, Amount is negative)
@@ -58,87 +79,165 @@ function generateSalesVouchersXml(bills) {
     const partyAmount = isCreditNote ? totalAmount.toFixed(2) : (-totalAmount).toFixed(2);
     const incomeMultiplier = isCreditNote ? -1 : 1;
 
+    const addressLines = (clientAddress || '').split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+
     let vchXml = `        <TALLYMESSAGE xmlns:UDF="TallyUDF">
           <VOUCHER VCHTYPE="${escapeXml(vchType)}" ACTION="Create">
             <DATE>${invDate}</DATE>
-            <VOUCHERNUMBER>${escapeXml(invNo)}</VOUCHERNUMBER>
-            <PARTYLEDGERNAME>${escapeXml(clientName)}</PARTYLEDGERNAME>
-            <BASICBUYERNAME>${escapeXml(clientName)}</BASICBUYERNAME>
+            <GUID>${escapeXml(guid)}</GUID>
+            <STATENAME>${escapeXml(clientState)}</STATENAME>
+            <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+            <PARTYGSTIN>${escapeXml(clientGstin)}</PARTYGSTIN>
             <PLACEOFSUPPLY>${escapeXml(pos)}</PLACEOFSUPPLY>
-            <NARRATION>${escapeXml(vchType)} ${escapeXml(invNo)}</NARRATION>
-            <ALLLEDGERENTRIES.LIST>
+            <PARTYNAME>${escapeXml(clientName)}</PARTYNAME>
+            <PARTYLEDGERNAME>${escapeXml(clientName)}</PARTYLEDGERNAME>
+            <VOUCHERTYPENAME>${escapeXml(vchType)}</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>${escapeXml(invNo)}</VOUCHERNUMBER>
+            <REFERENCE>${escapeXml(invNo)}</REFERENCE>
+            <BASICBASEPARTYNAME>${escapeXml(clientName)}</BASICBASEPARTYNAME>
+            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+            <CONSIGNEEGSTIN>${escapeXml(clientGstin)}</CONSIGNEEGSTIN>
+            <BASICBUYERNAME>${escapeXml(clientName)}</BASICBUYERNAME>
+            <CONSIGNEESTATENAME>${escapeXml(clientState)}</CONSIGNEESTATENAME>
+            <EFFECTIVEDATE>${invDate}</EFFECTIVEDATE>
+            <ISINVOICE>Yes</ISINVOICE>
+            <NARRATION>${escapeXml(narration)}</NARRATION>`;
+
+    if (addressLines.length > 0) {
+      vchXml += `
+            <ADDRESS.LIST TYPE="String">
+              ${addressLines.map(line => `<ADDRESS>${escapeXml(line)}</ADDRESS>`).join('\n              ')}
+            </ADDRESS.LIST>
+            <BASICBUYERADDRESS.LIST TYPE="String">
+              ${addressLines.map(line => `<BASICBUYERADDRESS>${escapeXml(line)}</BASICBUYERADDRESS>`).join('\n              ')}
+            </BASICBUYERADDRESS.LIST>`;
+    }
+
+    // Inventory items (INVENTORYENTRIES.LIST with BATCH & ACCOUNTINGALLOCATIONS)
+    for (const item of items) {
+      const iQty = Number(item.quantity) || 0;
+      const iRate = Number(item.rate) || 0;
+      const iUnit = item.unit || 'Nos';
+      const iAmt = iQty * iRate;
+      const itemTaxPct = item.taxPercent !== undefined ? Number(item.taxPercent) : Number(taxRate);
+      const itemRateStr = Number.isInteger(itemTaxPct) ? String(itemTaxPct) : itemTaxPct.toFixed(1);
+
+      const itemSalesLedger = isInterstate
+        ? (itemTaxPct > 0 ? `IGST SALES ${itemRateStr}%` : 'Sales')
+        : (itemTaxPct > 0 ? `GST SALES ${itemRateStr}%` : 'Sales');
+
+      vchXml += `
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>${escapeXml(item.name || 'Sales Item')}</STOCKITEMNAME>
+              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+              <RATE>${iRate.toFixed(2)}/${escapeXml(iUnit)}</RATE>
+              <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>
+              <ACTUALQTY> ${iQty} ${escapeXml(iUnit)}</ACTUALQTY>
+              <BILLEDQTY> ${iQty} ${escapeXml(iUnit)}</BILLEDQTY>
+              <BATCHALLOCATIONS.LIST>
+                <GODOWNNAME>Main Location</GODOWNNAME>
+                <BATCHNAME>Primary Batch</BATCHNAME>
+                <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>
+                <ACTUALQTY> ${iQty} ${escapeXml(iUnit)}</ACTUALQTY>
+                <BILLEDQTY> ${iQty} ${escapeXml(iUnit)}</BILLEDQTY>
+              </BATCHALLOCATIONS.LIST>
+              <ACCOUNTINGALLOCATIONS.LIST>
+                <LEDGERNAME>${escapeXml(itemSalesLedger)}</LEDGERNAME>
+                <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+                <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+                <ISPARTYLEDGER>No</ISPARTYLEDGER>
+                <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>
+              </ACCOUNTINGALLOCATIONS.LIST>
+            </INVENTORYENTRIES.LIST>`;
+    }
+
+    // Ledger entries (LEDGERENTRIES.LIST)
+    // 1. Party Ledger Entry
+    vchXml += `
+            <LEDGERENTRIES.LIST>
               <LEDGERNAME>${escapeXml(clientName)}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>${partyPositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
               <AMOUNT>${partyAmount}</AMOUNT>
               <BILLALLOCATIONS.LIST>
                 <NAME>${escapeXml(invNo)}</NAME>
                 <BILLTYPE>New Ref</BILLTYPE>
                 <AMOUNT>${partyAmount}</AMOUNT>
               </BILLALLOCATIONS.LIST>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Sales Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
-              <AMOUNT>${(incomeMultiplier * taxableAmount).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
+            </LEDGERENTRIES.LIST>`;
 
-    if (cgst > 0) {
+    // 2. Sales Ledger Entry (only if items list was empty)
+    if (items.length === 0) {
+      const salesLedger = isInterstate ? (Number(taxRate) > 0 ? `IGST SALES ${taxRate}%` : 'Igst Sales') : (Number(taxRate) > 0 ? `GST SALES ${taxRate}%` : 'Sales');
       vchXml += `
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>CGST</LEDGERNAME>
+            <LEDGERENTRIES.LIST>
+              <LEDGERNAME>${escapeXml(salesLedger)}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
-              <AMOUNT>${(incomeMultiplier * cgst).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>${(incomeMultiplier * taxableAmount).toFixed(2)}</AMOUNT>
+            </LEDGERENTRIES.LIST>`;
     }
-    if (sgst > 0) {
-      vchXml += `
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>SGST</LEDGERNAME>
+
+    // 3. Tax Ledgers (matching Tally ERP 9 output naming)
+    if (isInterstate) {
+      if (igst > 0) {
+        vchXml += `
+            <LEDGERENTRIES.LIST>
+              <BASICRATEOFINVOICETAX.LIST TYPE="Number">
+                <BASICRATEOFINVOICETAX> ${taxRate}</BASICRATEOFINVOICETAX>
+              </BASICRATEOFINVOICETAX.LIST>
+              <LEDGERNAME>OUTPUT IGST ${taxRate}%</LEDGERNAME>
               <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
-              <AMOUNT>${(incomeMultiplier * sgst).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
-    }
-    if (igst > 0) {
-      vchXml += `
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>IGST</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
               <AMOUNT>${(incomeMultiplier * igst).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
+            </LEDGERENTRIES.LIST>`;
+      }
+    } else {
+      if (sgst > 0) {
+        vchXml += `
+            <LEDGERENTRIES.LIST>
+              <BASICRATEOFINVOICETAX.LIST TYPE="Number">
+                <BASICRATEOFINVOICETAX> ${halfRate}</BASICRATEOFINVOICETAX>
+              </BASICRATEOFINVOICETAX.LIST>
+              <LEDGERNAME>OUTPUT SGST ${halfRate}%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>${(incomeMultiplier * sgst).toFixed(2)}</AMOUNT>
+            </LEDGERENTRIES.LIST>`;
+      }
+      if (cgst > 0) {
+        vchXml += `
+            <LEDGERENTRIES.LIST>
+              <BASICRATEOFINVOICETAX.LIST TYPE="Number">
+                <BASICRATEOFINVOICETAX> ${halfRate}</BASICRATEOFINVOICETAX>
+              </BASICRATEOFINVOICETAX.LIST>
+              <LEDGERNAME>OUTPUT CGST ${halfRate}%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>${(incomeMultiplier * cgst).toFixed(2)}</AMOUNT>
+            </LEDGERENTRIES.LIST>`;
+      }
     }
+
     if (cess > 0) {
       vchXml += `
-            <ALLLEDGERENTRIES.LIST>
+            <LEDGERENTRIES.LIST>
               <LEDGERNAME>Cess</LEDGERNAME>
               <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
               <AMOUNT>${(incomeMultiplier * cess).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
-    }
-    if (Math.abs(roundOff) > 0.001) {
-      vchXml += `
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Round Off</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>${roundOff > 0 ? incomePositive : partyPositive}</ISDEEMEDPOSITIVE>
-              <AMOUNT>${(incomeMultiplier * roundOff).toFixed(2)}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>`;
+            </LEDGERENTRIES.LIST>`;
     }
 
-    // Inventory items
-    const items = b.data.items || [];
-    for (const item of items) {
-      const iQty = Number(item.quantity) || 0;
-      const iRate = Number(item.rate) || 0;
-      const iUnit = item.unit || 'Nos';
-      const iAmt = iQty * iRate;
+    if (Math.abs(roundOff) > 0.001) {
       vchXml += `
-            <ALLINVENTORYENTRIES.LIST>
-              <STOCKITEMNAME>${escapeXml(item.name)}</STOCKITEMNAME>
-              <ISDEEMEDPOSITIVE>${incomePositive}</ISDEEMEDPOSITIVE>
-              <RATE>${iRate.toFixed(2)}/${escapeXml(iUnit)}</RATE>
-              <AMOUNT>${(incomeMultiplier * iAmt).toFixed(2)}</AMOUNT>
-              <ACTUALQTY>${iQty} ${escapeXml(iUnit)}</ACTUALQTY>
-              <BILLEDQTY>${iQty} ${escapeXml(iUnit)}</BILLEDQTY>
-            </ALLINVENTORYENTRIES.LIST>`;
+            <LEDGERENTRIES.LIST>
+              <ROUNDTYPE>Normal Rounding</ROUNDTYPE>
+              <LEDGERNAME>ROUND OF</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>${roundOff > 0 ? incomePositive : partyPositive}</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>${(incomeMultiplier * roundOff).toFixed(2)}</AMOUNT>
+            </LEDGERENTRIES.LIST>`;
     }
 
     vchXml += `

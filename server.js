@@ -967,7 +967,7 @@ app.post('/api/import', (req, res) => {
 // Accepts direct HTTP POST / PUT from Tally's "Alt + O" (Upload Voucher).
 // In Tally: Alt + O -> Web Page (HTTP/HTTPS) -> URL: https://billing.ecozen.in/api/tally/upload
 // Format: XML (Data Interchange).
-app.all(['/api/tally/upload', '/api/tally/upload/*'], async (req, res) => {
+app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
   // GET returns endpoint readiness in Tally-friendly XML or JSON
   if (req.method === 'GET') {
     if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {

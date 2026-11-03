@@ -101,7 +101,7 @@ app.use((req, res, next) => {
 });
 
 // Ensure data directory and sub-directories exist
-const DIRS = ['bills', 'clients', 'templates', 'products', 'expenses', 'recurring', 'receipts', 'profiles', 'purchases'];
+const DIRS = ['bills', 'clients', 'templates', 'products', 'expenses', 'recurring', 'receipts', 'profiles', 'purchases', 'tally-pending'];
 for (const dir of DIRS) {
   const dirPath = path.join(DATA_DIR, dir);
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
@@ -1078,11 +1078,14 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
       savedProductsCount++;
     }
 
-    // 3. Save Vouchers / Bills
+    // 3. Queue Vouchers into Pending Approval (data/tally-pending/)
+    let savedPendingCount = 0;
+    const existingBills = readAllFromDir('bills');
+
     for (const bill of parsed.bills) {
       if (!bill) continue;
-      const invoiceNumber = bill.invoiceNumber || bill.id;
-      if (!invoiceNumber) continue;
+      const invNo = bill.invoiceNumber || bill.id;
+      if (!invNo) continue;
 
       if (!bill.data) bill.data = {};
       if (!bill.data.profile || !bill.data.profile.businessName) {
@@ -1103,33 +1106,41 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
         };
       }
 
-      const filePath = path.join(DATA_DIR, 'bills', safeFileName(bill.id) + '.json');
-      writeJSON(filePath, bill);
-      savedBillsCount++;
+      const match = existingBills.find((eb) =>
+        (eb.invoiceNumber || eb.id || '').trim().toLowerCase() === invNo.trim().toLowerCase()
+      );
 
-      // Register client from bill if not existing
-      if (bill.clientName && !existingClients.some(ec => ec.name?.trim().toLowerCase() === bill.clientName.trim().toLowerCase())) {
-        const clientData = bill.data?.client || {};
-        const newClientId = 'cli_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-        const newClient = {
-          id: newClientId,
-          name: bill.clientName,
-          gstin: bill.clientGstin || clientData.gstin || '',
-          state: clientData.state || '',
-          country: clientData.country || 'India',
-          address: clientData.address || '',
-          pin: clientData.pin || '',
-          phone: clientData.phone || '',
-          email: clientData.email || '',
-        };
-        const cPath = path.join(DATA_DIR, 'clients', safeFileName(newClientId) + '.json');
-        writeJSON(cPath, newClient);
-        existingClients.push(newClient);
-        savedClientsCount++;
-      }
+      const pendingId = safeFileName(invNo);
+      const pendingRecord = {
+        id: pendingId,
+        invoiceNumber: invNo,
+        invoiceDate: bill.invoiceDate || '',
+        clientName: bill.clientName || 'Cash Customer',
+        clientGstin: bill.clientGstin || bill.data?.client?.gstin || '',
+        type: bill.type || 'tax-invoice',
+        totalAmount: Number(bill.totalAmount) || 0,
+        totalTaxAmount: Number(bill.totalTaxAmount) || 0,
+        itemsCount: bill.data?.items?.length || 0,
+        items: bill.data?.items || [],
+        receivedAt: new Date().toISOString(),
+        status: 'pending_approval',
+        existsInBills: !!match,
+        existingBill: match ? {
+          id: match.id,
+          invoiceNumber: match.invoiceNumber || match.id,
+          invoiceDate: match.invoiceDate || '',
+          totalAmount: match.totalAmount || 0,
+          clientName: match.clientName || match.data?.client?.name || '',
+        } : null,
+        billData: bill,
+      };
+
+      const pendingPath = path.join(DATA_DIR, 'tally-pending', pendingId + '.json');
+      writeJSON(pendingPath, pendingRecord);
+      savedPendingCount++;
     }
 
-    const totalSaved = savedBillsCount + savedProductsCount + savedClientsCount;
+    const totalSaved = savedPendingCount + savedProductsCount + savedClientsCount;
     if (totalSaved === 0 && parsed.errors.length > 0) {
       res.setHeader('Content-Type', 'text/xml; charset=utf-8');
       return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1141,7 +1152,7 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
 </RESPONSE>`);
     }
 
-    console.log(`[tally] Upload complete. Saved ${savedBillsCount} bills, ${savedClientsCount} clients, ${savedProductsCount} products.`);
+    console.log(`[tally] Upload queued. Placed ${savedPendingCount} vouchers in Pending Approval queue.`);
 
     // Return JSON if requested by client / API caller
     if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {
@@ -1149,7 +1160,7 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
         ok: true,
         status: 'Success',
         totalSaved,
-        vouchersSaved: savedBillsCount,
+        pendingVouchers: savedPendingCount,
         clientsSaved: savedClientsCount,
         productsSaved: savedProductsCount,
         errors: parsed.errors,
@@ -1161,9 +1172,9 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
     return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
 <RESPONSE>
   <STATUS>Success</STATUS>
-  <MESSAGE>Voucher uploaded successfully to Free GST Billing Software</MESSAGE>
+  <MESSAGE>Voucher uploaded successfully and placed in Pending Approval list</MESSAGE>
   <CREATED>${totalSaved}</CREATED>
-  <VOUCHERS_SAVED>${savedBillsCount}</VOUCHERS_SAVED>
+  <PENDING_VOUCHERS>${savedPendingCount}</PENDING_VOUCHERS>
   <CLIENTS_SAVED>${savedClientsCount}</CLIENTS_SAVED>
   <PRODUCTS_SAVED>${savedProductsCount}</PRODUCTS_SAVED>
   <ALTERED>0</ALTERED>
@@ -1180,6 +1191,191 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
   <ERRORS>1</ERRORS>
 </RESPONSE>`);
   }
+});
+
+// ========================
+// TALLY PENDING QUEUE APIS (v1.10.89)
+// ========================
+
+// 1. List pending vouchers
+app.get('/api/tally/pending', (req, res) => {
+  const pending = readAllFromDir('tally-pending');
+  const existingBills = readAllFromDir('bills');
+
+  // Dynamically refresh existsInBills
+  const enriched = pending.map((item) => {
+    const invNo = item.invoiceNumber || item.id;
+    const match = existingBills.find((eb) =>
+      (eb.invoiceNumber || eb.id || '').trim().toLowerCase() === (invNo || '').trim().toLowerCase()
+    );
+    return {
+      ...item,
+      existsInBills: !!match,
+      existingBill: match ? {
+        id: match.id,
+        invoiceNumber: match.invoiceNumber || match.id,
+        invoiceDate: match.invoiceDate || '',
+        totalAmount: match.totalAmount || 0,
+        clientName: match.clientName || match.data?.client?.name || '',
+      } : null,
+    };
+  });
+
+  enriched.sort((a, b) => new Date(b.receivedAt || 0) - new Date(a.receivedAt || 0));
+  res.json(enriched);
+});
+
+// 2. Approve a single pending voucher
+app.post('/api/tally/pending/:id/approve', (req, res) => {
+  const pendingId = safeFileName(req.params.id);
+  const pendingFilePath = path.join(DATA_DIR, 'tally-pending', pendingId + '.json');
+  if (!fs.existsSync(pendingFilePath)) {
+    return res.status(404).json({ error: 'Pending voucher not found', id: pendingId });
+  }
+
+  const pendingRecord = readJSON(pendingFilePath);
+  if (!pendingRecord || !pendingRecord.billData) {
+    return res.status(400).json({ error: 'Invalid pending voucher payload' });
+  }
+
+  const bill = pendingRecord.billData;
+  const strategy = req.query.strategy || req.body?.strategy || 'overwrite'; // 'overwrite' | 'keep-both'
+
+  let targetId = bill.id || bill.invoiceNumber;
+  let targetInvoiceNumber = bill.invoiceNumber || targetId;
+
+  const targetPath = path.join(DATA_DIR, 'bills', safeFileName(targetId) + '.json');
+
+  if (fs.existsSync(targetPath) && strategy === 'keep-both') {
+    let counter = 1;
+    let candidate = `${targetInvoiceNumber}-${counter}`;
+    while (fs.existsSync(path.join(DATA_DIR, 'bills', safeFileName(candidate) + '.json'))) {
+      counter++;
+      candidate = `${targetInvoiceNumber}-${counter}`;
+    }
+    targetId = candidate;
+    targetInvoiceNumber = candidate;
+    bill.id = targetId;
+    bill.invoiceNumber = targetInvoiceNumber;
+    if (bill.data?.details) bill.data.details.invoiceNumber = targetInvoiceNumber;
+  }
+
+  // Save bill into data/bills/
+  const finalBillPath = path.join(DATA_DIR, 'bills', safeFileName(targetId) + '.json');
+  writeJSON(finalBillPath, bill);
+
+  // Auto-register client if not present
+  if (bill.clientName) {
+    const existingClients = readAllFromDir('clients');
+    const hasClient = existingClients.some((ec) =>
+      (bill.clientGstin && ec.gstin && ec.gstin.toUpperCase() === bill.clientGstin.toUpperCase()) ||
+      ec.name?.trim().toLowerCase() === bill.clientName.trim().toLowerCase()
+    );
+    if (!hasClient) {
+      const clientData = bill.data?.client || {};
+      const newClientId = 'cli_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+      const newClient = {
+        id: newClientId,
+        name: bill.clientName,
+        gstin: bill.clientGstin || clientData.gstin || '',
+        state: clientData.state || '',
+        country: clientData.country || 'India',
+        address: clientData.address || '',
+        pin: clientData.pin || '',
+        phone: clientData.phone || '',
+        email: clientData.email || '',
+      };
+      writeJSON(path.join(DATA_DIR, 'clients', safeFileName(newClientId) + '.json'), newClient);
+    }
+  }
+
+  // Auto-register items into products catalog if not present
+  const items = bill.data?.items || [];
+  if (items.length > 0) {
+    const existingProducts = readAllFromDir('products');
+    for (const item of items) {
+      if (!item.name) continue;
+      const match = existingProducts.find((ep) => ep.name?.trim().toLowerCase() === item.name.trim().toLowerCase());
+      if (!match) {
+        const prodId = 'prod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        const newProduct = {
+          id: prodId,
+          name: item.name,
+          hsn: item.hsn || '',
+          unit: item.unit || 'Nos',
+          rate: Number(item.rate) || 0,
+          stock: 0,
+          taxPercent: Number(item.taxPercent) || 18,
+        };
+        writeJSON(path.join(DATA_DIR, 'products', safeFileName(prodId) + '.json'), newProduct);
+      }
+    }
+  }
+
+  // Delete from pending queue
+  deleteFile(pendingFilePath);
+
+  res.json({
+    ok: true,
+    approved: true,
+    billId: targetId,
+    invoiceNumber: targetInvoiceNumber,
+  });
+});
+
+// 3. Reject / Delete a single voucher from pending
+app.delete('/api/tally/pending/:id', (req, res) => {
+  const pendingId = safeFileName(req.params.id);
+  const pendingFilePath = path.join(DATA_DIR, 'tally-pending', pendingId + '.json');
+  if (fs.existsSync(pendingFilePath)) {
+    deleteFile(pendingFilePath);
+  }
+  res.json({ ok: true, deleted: true, id: pendingId });
+});
+
+// 4. Batch approve all pending vouchers
+app.post('/api/tally/pending/approve-all', (req, res) => {
+  const pending = readAllFromDir('tally-pending');
+  const strategy = req.query.strategy || req.body?.strategy || 'overwrite';
+  let approvedCount = 0;
+
+  for (const item of pending) {
+    if (!item || !item.billData) continue;
+    const bill = item.billData;
+    let targetId = bill.id || bill.invoiceNumber;
+    let targetInvoiceNumber = bill.invoiceNumber || targetId;
+
+    if (fs.existsSync(path.join(DATA_DIR, 'bills', safeFileName(targetId) + '.json')) && strategy === 'keep-both') {
+      let counter = 1;
+      let candidate = `${targetInvoiceNumber}-${counter}`;
+      while (fs.existsSync(path.join(DATA_DIR, 'bills', safeFileName(candidate) + '.json'))) {
+        counter++;
+        candidate = `${targetInvoiceNumber}-${counter}`;
+      }
+      targetId = candidate;
+      targetInvoiceNumber = candidate;
+      bill.id = targetId;
+      bill.invoiceNumber = targetInvoiceNumber;
+      if (bill.data?.details) bill.data.details.invoiceNumber = targetInvoiceNumber;
+    }
+
+    writeJSON(path.join(DATA_DIR, 'bills', safeFileName(targetId) + '.json'), bill);
+    deleteFile(path.join(DATA_DIR, 'tally-pending', safeFileName(item.id) + '.json'));
+    approvedCount++;
+  }
+
+  res.json({ ok: true, approvedCount });
+});
+
+// 5. Batch clear all pending vouchers
+app.post('/api/tally/pending/clear', (req, res) => {
+  const pending = readAllFromDir('tally-pending');
+  let clearedCount = 0;
+  for (const item of pending) {
+    deleteFile(path.join(DATA_DIR, 'tally-pending', safeFileName(item.id) + '.json'));
+    clearedCount++;
+  }
+  res.json({ ok: true, clearedCount });
 });
 
 // ========================

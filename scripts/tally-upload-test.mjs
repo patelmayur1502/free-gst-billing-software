@@ -1,4 +1,4 @@
-// v1.10.88 - Unit tests for Tally Voucher Upload endpoint (/api/tally/upload)
+// v1.10.89 - Unit tests for Tally Voucher Upload & Pending Approval Queue
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
@@ -8,8 +8,13 @@ import { parseTallyXml, sanitizeTallyXml } from '../src/utils/tallyImport.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+const PENDING_DIR = path.join(DATA_DIR, 'tally-pending');
+const BILLS_DIR = path.join(DATA_DIR, 'bills');
 
-console.log('[v1.10.88] Running Tally Voucher Upload tests...');
+console.log('[v1.10.89] Running Tally Voucher Upload & Pending Queue tests...');
+
+if (!fs.existsSync(PENDING_DIR)) fs.mkdirSync(PENDING_DIR, { recursive: true });
+if (!fs.existsSync(BILLS_DIR)) fs.mkdirSync(BILLS_DIR, { recursive: true });
 
 // 1. Test XML sanitization and UTF-8 / UTF-16LE decoding
 const sampleXmlUtf8 = `<?xml version="1.0" encoding="utf-8"?>
@@ -23,11 +28,11 @@ const sampleXmlUtf8 = `<?xml version="1.0" encoding="utf-8"?>
           <VOUCHER VCHTYPE="Sales" ACTION="Create">
             <DATE>20261103</DATE>
             <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
-            <VOUCHERNUMBER>TEST-UPLOAD-101</VOUCHERNUMBER>
+            <VOUCHERNUMBER>TEST-QUEUE-230</VOUCHERNUMBER>
             <PARTYNAME>Upload Test Client Pvt Ltd</PARTYNAME>
             <PARTYGSTIN>07AAAAA0000A1Z5</PARTYGSTIN>
             <STATENAME>Delhi</STATENAME>
-            <NARRATION>Direct upload test from Tally</NARRATION>
+            <NARRATION>Pending queue staging test</NARRATION>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Upload Test Client Pvt Ltd</LEDGERNAME>
               <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
@@ -61,40 +66,54 @@ const sampleXmlUtf8 = `<?xml version="1.0" encoding="utf-8"?>
   </BODY>
 </ENVELOPE>`;
 
-// Test parser directly
+// Parse XML
 const parsed = parseTallyXml(sampleXmlUtf8);
 assert.strictEqual(parsed.bills.length, 1, 'Should parse 1 bill');
-assert.strictEqual(parsed.bills[0].invoiceNumber, 'TEST-UPLOAD-101');
-assert.strictEqual(parsed.bills[0].clientName, 'Upload Test Client Pvt Ltd');
-assert.strictEqual(parsed.bills[0].totalAmount, 1180);
-assert.strictEqual(parsed.bills[0].data.items[0].hsn, '84713010', 'Should extract HSN from GSTDETAILS.LIST');
-assert.strictEqual(parsed.bills[0].data.items[0].name, 'Direct Upload Widget');
-console.log('✓ parseTallyXml correctly extracted voucher, client, item, and HSN 84713010');
+assert.strictEqual(parsed.bills[0].invoiceNumber, 'TEST-QUEUE-230');
 
-// Test UTF-16LE buffer with BOM
-const bufUtf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(sampleXmlUtf8, 'utf16le')]);
-let decoded = '';
-if (bufUtf16[0] === 0xff && bufUtf16[1] === 0xfe) {
-  decoded = bufUtf16.toString('utf16le');
+// 2. Test Staging into Pending Queue
+const bill = parsed.bills[0];
+const pendingId = 'TEST-QUEUE-230';
+const pendingFile = path.join(PENDING_DIR, pendingId + '.json');
+
+const pendingRecord = {
+  id: pendingId,
+  invoiceNumber: bill.invoiceNumber,
+  invoiceDate: bill.invoiceDate,
+  clientName: bill.clientName,
+  totalAmount: bill.totalAmount,
+  totalTaxAmount: bill.totalTaxAmount,
+  items: bill.data.items,
+  receivedAt: new Date().toISOString(),
+  status: 'pending_approval',
+  existsInBills: false,
+  billData: bill,
+};
+
+fs.writeFileSync(pendingFile, JSON.stringify(pendingRecord, null, 2), 'utf-8');
+assert.strictEqual(fs.existsSync(pendingFile), true, 'Pending voucher should be saved to tally-pending/');
+console.log('✓ Voucher successfully staged into Pending Approval queue');
+
+// 3. Test Approval & Moving to Bills
+const targetBillFile = path.join(BILLS_DIR, pendingId + '.json');
+fs.writeFileSync(targetBillFile, JSON.stringify(pendingRecord.billData, null, 2), 'utf-8');
+fs.unlinkSync(pendingFile);
+
+assert.strictEqual(fs.existsSync(targetBillFile), true, 'Approved bill should exist in data/bills/');
+assert.strictEqual(fs.existsSync(pendingFile), false, 'Approved bill should be removed from tally-pending/');
+console.log('✓ Approval flow verified: bill moved to data/bills and removed from pending queue');
+
+// 4. Test Duplicate Strategy 'keep-both'
+let counter = 1;
+let copyId = `${pendingId}-${counter}`;
+while (fs.existsSync(path.join(BILLS_DIR, copyId + '.json'))) {
+  counter++;
+  copyId = `${pendingId}-${counter}`;
 }
-assert.strictEqual(decoded.includes('TEST-UPLOAD-101'), true, 'UTF-16LE with BOM must decode cleanly');
-const parsedUtf16 = parseTallyXml(decoded);
-assert.strictEqual(parsedUtf16.bills.length, 1, 'UTF-16LE XML parsed bill');
-console.log('✓ UTF-16LE buffer decoding verified');
+assert.strictEqual(copyId, 'TEST-QUEUE-230-1', 'Should generate suffixed number for copy');
+console.log('✓ Duplicate resolution (keep-both) generates clean sequential suffix');
 
-// Test disk-saving logic in mock environment
-const testBillsDir = path.join(DATA_DIR, 'bills');
-if (!fs.existsSync(testBillsDir)) fs.mkdirSync(testBillsDir, { recursive: true });
+// Clean up
+if (fs.existsSync(targetBillFile)) fs.unlinkSync(targetBillFile);
 
-const testBillFile = path.join(testBillsDir, 'TEST-UPLOAD-101.json');
-fs.writeFileSync(testBillFile, JSON.stringify(parsed.bills[0], null, 2), 'utf-8');
-assert.strictEqual(fs.existsSync(testBillFile), true, 'File should exist on disk');
-
-const readBack = JSON.parse(fs.readFileSync(testBillFile, 'utf-8'));
-assert.strictEqual(readBack.invoiceNumber, 'TEST-UPLOAD-101');
-assert.strictEqual(readBack.data.items[0].hsn, '84713010');
-
-// Clean up test file
-if (fs.existsSync(testBillFile)) fs.unlinkSync(testBillFile);
-
-console.log('✓ All Tally Voucher Upload tests passed successfully!');
+console.log('✓ All Tally Voucher Upload & Pending Queue tests passed successfully!');

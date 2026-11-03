@@ -235,6 +235,17 @@ export const getTrashedBills = async () => apiFetch(`${API}/trash`);
 export const restoreTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({}) });
 export const purgeTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
+// v1.10.89 - Tally Pending Vouchers Staging & Approval Queue
+export const getPendingTallyVouchers = async () => apiFetch(`${API}/tally/pending`);
+export const approvePendingTallyVoucher = async (id, strategy = 'overwrite') =>
+  apiFetch(`${API}/tally/pending/${encodeURIComponent(id)}/approve?strategy=${strategy}`, { method: 'POST', body: JSON.stringify({}) });
+export const rejectPendingTallyVoucher = async (id) =>
+  apiFetch(`${API}/tally/pending/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const approveAllPendingTallyVouchers = async (strategy = 'overwrite') =>
+  apiFetch(`${API}/tally/pending/approve-all?strategy=${strategy}`, { method: 'POST', body: JSON.stringify({}) });
+export const clearAllPendingTallyVouchers = async () =>
+  apiFetch(`${API}/tally/pending/clear`, { method: 'POST', body: JSON.stringify({}) });
+
 // ---- Profile ----
 export const saveProfile = async (profile) => {
   return apiFetch(`${API}/profile`, { method: 'POST', body: JSON.stringify(profile) });

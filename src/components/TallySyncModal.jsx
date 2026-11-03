@@ -1,17 +1,23 @@
-// v1.10.88 - Tally Sync Modal: 1-Click Export to Tally XML (for CA), Import Masters / Sales with HSN, and Live Upload (Alt + O)
-import { useState } from 'react';
-import { X, Download, Upload, CheckCircle, Layers, AlertTriangle, RefreshCw, Globe, Copy, Check } from 'lucide-react';
+// v1.10.89 - Tally Sync Modal: Pending Approval Queue, 1-Click Export to Tally XML, and Live Upload (Alt + O)
+import { useState, useEffect } from 'react';
+import { X, Download, Upload, CheckCircle, Layers, AlertTriangle, RefreshCw, Globe, Copy, Check, Inbox, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { exportToTallyXml } from '../utils/tallyExport.js';
 import { parseTallyXml, detectDuplicateInvoices, resolveDuplicateBill, normalizeItemKey } from '../utils/tallyImport.js';
 import {
   saveClient, saveProduct, saveBill, getAllClients, getAllProducts,
   getAllBills, getAllPurchases, getAllReceipts, getProfile,
+  getPendingTallyVouchers, approvePendingTallyVoucher, rejectPendingTallyVoucher,
+  approveAllPendingTallyVouchers, clearAllPendingTallyVouchers,
 } from '../store';
 import { localToday, belongsToProfile } from '../utils';
 import { toast } from './Toast';
 
-export default function TallySyncModal({ show, onClose }) {
-  const [activeTab, setActiveTab] = useState('export'); // 'export' | 'import' | 'webhook'
+export default function TallySyncModal({ show, onClose, onVouchersApproved }) {
+  const [activeTab, setActiveTab] = useState('pending'); // 'pending' | 'export' | 'import' | 'webhook'
+  const [pendingVouchers, setPendingVouchers] = useState([]);
+  const [loadingPending, setLoadingPending] = useState(false);
+  const [expandedPendingId, setExpandedPendingId] = useState(null);
+
   const [period, setPeriod] = useState('month'); // 'month' | 'last-month' | 'fy'
   const [includeSales, setIncludeSales] = useState(true);
   const [includePurchases, setIncludePurchases] = useState(true);
@@ -26,6 +32,71 @@ export default function TallySyncModal({ show, onClose }) {
   const [duplicateStrategy, setDuplicateStrategy] = useState('keep-both'); // 'keep-both' | 'replace' | 'skip'
   const [duplicateInfo, setDuplicateInfo] = useState(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const loadPending = async () => {
+    try {
+      setLoadingPending(true);
+      const list = await getPendingTallyVouchers();
+      const safeList = Array.isArray(list) ? list : [];
+      setPendingVouchers(safeList);
+      if (safeList.length === 0 && activeTab === 'pending') {
+        setActiveTab('export');
+      } else if (safeList.length > 0) {
+        setActiveTab('pending');
+      }
+    } catch {
+      setPendingVouchers([]);
+    } finally {
+      setLoadingPending(false);
+    }
+  };
+
+  useEffect(() => {
+    if (show) loadPending();
+  }, [show]);
+
+  const handleApprovePending = async (voucher, strategy = 'overwrite') => {
+    try {
+      await approvePendingTallyVoucher(voucher.id, strategy);
+      toast(`Approved ${voucher.invoiceNumber || voucher.id}! Added to invoices.`, 'success');
+      loadPending();
+      if (onVouchersApproved) onVouchersApproved();
+    } catch (err) {
+      toast('Failed to approve voucher: ' + (err.message || 'Unknown error'), 'error');
+    }
+  };
+
+  const handleRejectPending = async (voucher) => {
+    try {
+      await rejectPendingTallyVoucher(voucher.id);
+      toast(`Discarded ${voucher.invoiceNumber || voucher.id}.`, 'info');
+      loadPending();
+    } catch (err) {
+      toast('Failed to discard voucher: ' + err.message, 'error');
+    }
+  };
+
+  const handleApproveAllPending = async (strategy = 'overwrite') => {
+    try {
+      const res = await approveAllPendingTallyVouchers(strategy);
+      toast(`Approved ${res.approvedCount || pendingVouchers.length} voucher(s)! Added to invoices.`, 'success');
+      loadPending();
+      if (onVouchersApproved) onVouchersApproved();
+    } catch (err) {
+      toast('Failed to approve all vouchers: ' + err.message, 'error');
+    }
+  };
+
+  const handleClearAllPending = async () => {
+    if (!window.confirm('Are you sure you want to discard all pending Tally vouchers?')) return;
+    try {
+      await clearAllPendingTallyVouchers();
+      toast('Cleared all pending vouchers.', 'info');
+      loadPending();
+    } catch (err) {
+      toast('Failed to clear pending vouchers: ' + err.message, 'error');
+    }
+  };
 
   if (!show) return null;
 
@@ -412,7 +483,27 @@ export default function TallySyncModal({ show, onClose }) {
         </div>
 
         {/* Tab Navigation */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: '1.25rem', borderBottom: '1px solid var(--border-color, #e5e7eb)', paddingBottom: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: '1.25rem', borderBottom: '1px solid var(--border-color, #e5e7eb)', paddingBottom: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className={activeTab === 'pending' ? 'btn btn-primary' : 'btn btn-secondary'}
+            onClick={() => setActiveTab('pending')}
+            style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }}>
+            <Inbox size={14} /> Pending Approval
+            {pendingVouchers.length > 0 && (
+              <span style={{
+                background: '#ef4444',
+                color: '#fff',
+                fontSize: '0.7rem',
+                fontWeight: 700,
+                padding: '1px 6px',
+                borderRadius: '10px',
+                marginLeft: 2,
+              }}>
+                {pendingVouchers.length}
+              </span>
+            )}
+          </button>
           <button
             type="button"
             className={activeTab === 'export' ? 'btn btn-primary' : 'btn btn-secondary'}
@@ -435,6 +526,241 @@ export default function TallySyncModal({ show, onClose }) {
             <Globe size={14} /> Live Upload (Alt + O)
           </button>
         </div>
+
+        {activeTab === 'pending' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <strong style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }}>
+                  Tally Vouchers Awaiting Approval ({pendingVouchers.length})
+                </strong>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  Vouchers uploaded from Tally (Alt + O). Review and approve or discard before adding to your bills.
+                </div>
+              </div>
+              {pendingVouchers.length > 0 && (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={handleClearAllPending}
+                    style={{ fontSize: '0.75rem', padding: '4px 10px', color: 'var(--danger)' }}>
+                    <Trash2 size={13} /> Discard All
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => handleApproveAllPending('overwrite')}
+                    style={{ fontSize: '0.75rem', padding: '4px 12px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <CheckCircle size={13} /> Approve All
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {loadingPending ? (
+              <div style={{ textAlign: 'center', padding: '2rem 1rem', color: 'var(--text-muted)' }}>
+                <RefreshCw size={24} className="spin" style={{ margin: '0 auto 0.5rem auto' }} />
+                <div>Loading pending vouchers...</div>
+              </div>
+            ) : pendingVouchers.length === 0 ? (
+              <div style={{
+                textAlign: 'center',
+                padding: '2.5rem 1rem',
+                color: 'var(--text-muted)',
+                background: 'var(--bg-card, #f9fafb)',
+                borderRadius: '8px',
+                border: '1px dashed var(--border-color, #e5e7eb)',
+              }}>
+                <Inbox size={40} style={{ margin: '0 auto 0.75rem auto', opacity: 0.4 }} />
+                <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
+                  No pending Tally vouchers
+                </div>
+                <div style={{ fontSize: '0.8rem', maxWidth: '380px', margin: '0 auto', lineHeight: 1.5 }}>
+                  When you press <strong>Alt + O</strong> in Tally, vouchers will appear here first so you can review them before they touch your live invoices.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: '420px', overflowY: 'auto', paddingRight: 4 }}>
+                {pendingVouchers.map((v) => {
+                  const isExpanded = expandedPendingId === v.id;
+                  const isDupe = !!v.existsInBills;
+                  return (
+                    <div
+                      key={v.id}
+                      style={{
+                        border: isDupe ? '1px solid #f59e0b' : '1px solid #10b981',
+                        borderRadius: 8,
+                        background: isDupe ? 'rgba(245, 158, 11, 0.05)' : 'rgba(16, 185, 129, 0.04)',
+                        padding: '10px 12px',
+                      }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <strong style={{ fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                              {v.invoiceNumber || v.id}
+                            </strong>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              • {v.invoiceDate || 'No date'}
+                            </span>
+                            {isDupe ? (
+                              <span style={{
+                                fontSize: '0.7rem',
+                                fontWeight: 600,
+                                background: '#fef3c7',
+                                color: '#92400e',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                border: '1px solid #fde68a',
+                              }}>
+                                ⚠️ Duplicate in Bills (₹{v.existingBill?.totalAmount})
+                              </span>
+                            ) : (
+                              <span style={{
+                                fontSize: '0.7rem',
+                                fontWeight: 600,
+                                background: '#d1fae5',
+                                color: '#065f46',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                border: '1px solid #a7f3d0',
+                              }}>
+                                ✅ New Invoice
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: 2 }}>
+                            Party: <strong>{v.clientName}</strong> {v.clientGstin ? `(${v.clientGstin})` : ''}
+                          </div>
+                        </div>
+
+                        <div style={{ textAlign: 'right' }}>
+                          <strong style={{ fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                            ₹{Number(v.totalAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </strong>
+                          {v.totalTaxAmount > 0 && (
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              GST: ₹{Number(v.totalTaxAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Items details toggle */}
+                      {v.items && v.items.length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedPendingId(isExpanded ? null : v.id)}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: 'var(--primary)',
+                              fontSize: '0.75rem',
+                              padding: 0,
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 4,
+                            }}>
+                            {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                            {v.items.length} line item{v.items.length !== 1 ? 's' : ''} {isExpanded ? '(Hide)' : '(View details)'}
+                          </button>
+
+                          {isExpanded && (
+                            <div style={{
+                              marginTop: 6,
+                              background: 'var(--bg-main, #ffffff)',
+                              border: '1px solid var(--border-color, #e5e7eb)',
+                              borderRadius: 6,
+                              padding: '6px 8px',
+                              fontSize: '0.76rem',
+                            }}>
+                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                  <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color, #e5e7eb)', textAlign: 'left' }}>
+                                    <th style={{ padding: '3px 4px' }}>Item</th>
+                                    <th style={{ padding: '3px 4px' }}>HSN</th>
+                                    <th style={{ padding: '3px 4px', textAlign: 'right' }}>Qty</th>
+                                    <th style={{ padding: '3px 4px', textAlign: 'right' }}>Rate</th>
+                                    <th style={{ padding: '3px 4px', textAlign: 'right' }}>GST%</th>
+                                    <th style={{ padding: '3px 4px', textAlign: 'right' }}>Total</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {v.items.map((it, idx) => (
+                                    <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.03)' }}>
+                                      <td style={{ padding: '3px 4px', fontWeight: 500 }}>{it.name}</td>
+                                      <td style={{ padding: '3px 4px', color: 'var(--text-muted)' }}>{it.hsn || '-'}</td>
+                                      <td style={{ padding: '3px 4px', textAlign: 'right' }}>{it.quantity} {it.unit || ''}</td>
+                                      <td style={{ padding: '3px 4px', textAlign: 'right' }}>₹{it.rate}</td>
+                                      <td style={{ padding: '3px 4px', textAlign: 'right' }}>{it.taxPercent}%</td>
+                                      <td style={{ padding: '3px 4px', textAlign: 'right', fontWeight: 600 }}>
+                                        ₹{Number(it.amount || ((it.quantity || 1) * (it.rate || 0))).toFixed(2)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => handleRejectPending(v)}
+                          style={{ fontSize: '0.75rem', padding: '4px 10px', color: 'var(--danger)' }}
+                          title="Discard this voucher without saving to bills">
+                          <Trash2 size={13} /> Discard
+                        </button>
+
+                        {isDupe ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => handleApprovePending(v, 'keep-both')}
+                              style={{ fontSize: '0.75rem', padding: '4px 10px' }}
+                              title="Keep both bills by assigning a suffixed number like IN-230-1">
+                              Keep Both (Copy)
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => handleApprovePending(v, 'overwrite')}
+                              style={{ fontSize: '0.75rem', padding: '4px 12px', background: '#d97706', borderColor: '#d97706' }}
+                              title="Overwrite the existing bill with this Tally voucher">
+                              Overwrite Existing
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => handleApprovePending(v, 'overwrite')}
+                            style={{ fontSize: '0.75rem', padding: '4px 12px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <CheckCircle size={13} /> Approve & Add to Bills
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="flex justify-between items-center" style={{ marginTop: '1.25rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-color, #e5e7eb)' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Tip: Press <strong>Alt + O</strong> in Tally to push vouchers directly here.
+              </span>
+              <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
+            </div>
+          </div>
+        )}
 
         {activeTab === 'export' ? (
           <div>
@@ -729,13 +1055,30 @@ export default function TallySyncModal({ show, onClose }) {
                   <li>Open any Sales Voucher or Day Book in Tally.</li>
                   <li>Press <strong>Alt + O</strong> (Upload) on your keyboard.</li>
                   <li>Set <strong>Upload to</strong> : <code>Web Page (HTTP/HTTPS)</code></li>
-                  <li>Paste the <strong>URL</strong> above.</li>
-                  <li>Set <strong>Secure Server</strong> : <code>{typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'Yes' : 'No'}</code></li>
-                  <li>Set <strong>Password (if any)</strong> : <code>Your App PIN</code> (if PIN lock is enabled, else leave blank).</li>
+                  <li>Set <strong>URL</strong> : <code>80.225.247.47/api/tally/upload</code> (Direct HTTP) or <code>billing.ecozen.in/api/tally/upload</code></li>
+                  <li>Set <strong>Secure Server</strong> : <code>? No</code> (bypasses SSL handshake error 9974)</li>
+                  <li>Set <strong>User Name &amp; Password</strong> : <em>Leave blank</em></li>
                   <li>Set <strong>Output format</strong> : <code>XML (Data Interchange)</code></li>
-                  <li>Press Enter to Upload. Tally will upload the voucher directly into this app!</li>
+                  <li>Press Enter to Upload. Tally uploads the voucher into your <strong>Pending Approval</strong> tab!</li>
                 </ol>
               </div>
+            </div>
+
+            <div style={{
+              background: 'rgba(245, 158, 11, 0.1)',
+              border: '1px solid rgba(245, 158, 11, 0.35)',
+              borderRadius: '8px',
+              padding: '0.75rem',
+              marginBottom: '1rem',
+              fontSize: '0.78rem',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.5,
+            }}>
+              <strong style={{ color: '#b45309', display: 'block', marginBottom: '0.2rem' }}>
+                ⚠️ Notice on Tally &quot;post error code 9974, ssl handshake failed&quot;:
+              </strong>
+              <div>Tally.ERP 9 relies on older Windows crypto ciphers and cannot negotiate modern TLS 1.3 SSL with Cloudflare.</div>
+              <div>To upload smoothly without SSL errors: set <strong>Secure Server : ? No</strong> and use URL <strong><code>80.225.247.47/api/tally/upload</code></strong>.</div>
             </div>
 
             <div style={{

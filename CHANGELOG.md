@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.89] - 2026-11-03
+
+### Added
+- **Tally Voucher Staging & Pending Approval Queue**:
+  - Implemented staging queue in `data/tally-pending/`: vouchers uploaded from Tally via `Alt + O` are held in pending status for user review before writing to live bills.
+  - Real-time duplicate detection: cross-references incoming voucher numbers against existing bills in `data/bills/` and displays clear visual indicators.
+  - Flexible duplicate resolution on approval:
+    - **Overwrite Existing**: Replaces the bill with the updated Tally voucher.
+    - **Keep Both (Copy)**: Automatically assigns the next sequential suffix (e.g. `IN-230-1`) preserving both invoices.
+    - **Discard**: Purges the pending voucher without modifying bills.
+  - Endpoints added: `GET /api/tally/pending`, `POST /api/tally/pending/:id/approve`, `DELETE /api/tally/pending/:id`, `POST /api/tally/pending/approve-all`, `POST /api/tally/pending/clear`.
+  - Added notification alert banner on Dashboard displaying live pending voucher counts with 1-click **Review & Approve**.
+  - Added **Pending Approval** tab in `TallySyncModal` with line item inspections, tax breakdowns, and batch approve/discard controls.
+  - Documented fix for Tally.ERP 9 `POST error code: 9974, SSL handshake failed` using direct HTTP URL (`80.225.247.47/api/tally/upload`) with `Secure Server: No`.
+
+---
+
 ## [1.10.88] - 2026-11-03
 
 ### Added

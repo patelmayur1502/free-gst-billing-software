@@ -31,6 +31,7 @@
 | `GET` | `/api/gstin-lookup/:gstin` | GSTIN taxpayer lookup & offline resolution | Local cache + offline fallback |
 | `POST` | `/api/import` | Selective database import & restore | 500MB payload limit |
 | `ALL`  | `/api/tally/upload` | Tally Voucher Upload webhook (Alt + O) | Auto-parses XML & backfills HSN |
+| `ALL`  | `/api/tally/pending[/*]` | Tally staging approval queue & actions | Stored in `data/tally-pending/` |
 | `GET` | `/api/backups` | List rolling 30-day backups & D: mirrors | Reads timestamps from disk |
 | `POST` | `/api/backups/now` | Trigger on-demand backup snapshot | Rate-limited: max 1 per 5s |
 | `POST` | `/api/backups/:date/restore` | Safe transactional rollback restore | Creates `pre-restore` snapshot first |

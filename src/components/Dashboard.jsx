@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer, Ban, Undo2, Eye } from 'lucide-react';
+import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer, Ban, Undo2, Eye, Inbox } from 'lucide-react';
 import HelpButton from './HelpButton';
-import { getAllBills, saveBill, getAllProducts, applyStockChanges, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts, markSavedPdfCancelled } from '../store';
+import { getAllBills, saveBill, getAllProducts, applyStockChanges, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts, markSavedPdfCancelled, getPendingTallyVouchers } from '../store';
 import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile, salesSign, isCancelledBill, markPaidPatch, markUnpaidPatch, stockEffect, appliedStock, stockDelta, SALES_INVOICE_TYPES, localToday, amountDue, paymentStatusFor } from '../utils';
 import { openWhatsAppShare } from '../utils/share';
 import { exportToTallyXml } from '../utils/tallyExport.js';
@@ -10,6 +10,7 @@ import LockButton from './LockButton';
 import ActionsMenu from './ActionsMenu';
 import BulkCsvImport from './BulkCsvImport';
 import PrintPreviewModal from './PrintPreviewModal';
+import TallySyncModal from './TallySyncModal';
 import SupportNudge from './SupportNudge';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
@@ -270,6 +271,8 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
   // elsewhere. Cleared whenever filters change so the user doesn't accidentally
   // bulk-act on bills they can no longer see.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [pendingTallyCount, setPendingTallyCount] = useState(0);
+  const [showTallyModal, setShowTallyModal] = useState(false);
   // v1.10.74 - the comment above was never wired up, so bulk actions could hit
   // ticked rows hidden by a filter. Reset during render (React's "adjust state
   // on prop change" pattern) when any filter changes.
@@ -445,7 +448,25 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
       const threshold = Number(cfg?.threshold ?? 5);
       setLowStockProducts(prods.filter(p => (p.stock ?? 0) <= threshold));
     });
+    refreshPendingTally();
+    const tallyTimer = setInterval(refreshPendingTally, 10000);
+    const onFocus = () => refreshPendingTally();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(tallyTimer);
+      window.removeEventListener('focus', onFocus);
+    };
   }, []);
+
+  const refreshPendingTally = async () => {
+    try {
+      const list = await getPendingTallyVouchers();
+      setPendingTallyCount(Array.isArray(list) ? list.length : 0);
+    } catch {
+      setPendingTallyCount(0);
+    }
+  };
+
 
   useEffect(() => {
     let result = bills;
@@ -1567,6 +1588,41 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
           </button>
         </div>
 
+        {/* Pending Tally Vouchers Banner */}
+        {pendingTallyCount > 0 && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.12) 0%, rgba(37, 99, 235, 0.08) 100%)',
+            border: '1px solid rgba(59, 130, 246, 0.35)',
+            borderRadius: '8px',
+            padding: '0.65rem 1rem',
+            marginBottom: '0.85rem',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Inbox size={20} style={{ color: 'var(--primary, #2563eb)', flexShrink: 0 }} />
+              <div>
+                <strong style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>
+                  {pendingTallyCount} Pending Tally Voucher{pendingTallyCount !== 1 ? 's' : ''} Awaiting Review
+                </strong>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  Uploaded via Tally Alt + O. Review and approve before adding to invoices to prevent duplicates.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setShowTallyModal(true)}
+              style={{ fontSize: '0.8rem', padding: '0.35rem 0.85rem', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
+              <CheckCircle size={14} /> Review & Approve ({pendingTallyCount})
+            </button>
+          </div>
+        )}
+
         {/* Bulk-action toolbar — only renders when at least one row is ticked. */}
         {selectedIds.size > 0 && (
           <div style={{
@@ -1908,6 +1964,13 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
       {receiptTarget && (
         <ReceiptModal target={receiptTarget} onClose={() => setReceiptTarget(null)} />
       )}
+
+      {/* Tally Sync & Pending Vouchers Modal */}
+      <TallySyncModal
+        show={showTallyModal}
+        onClose={() => setShowTallyModal(false)}
+        onVouchersApproved={() => { loadBills(); refreshPendingTally(); }}
+      />
     </div>
   );
 }

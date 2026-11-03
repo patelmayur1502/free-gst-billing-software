@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.88] - 2026-11-03
+
+### Added
+- **Direct Tally.ERP 9 & TallyPrime Voucher Upload Webhook (`/api/tally/upload`)**:
+  - Implemented direct HTTP/HTTPS endpoint for Tally's **Voucher Upload (`Alt + O`)** feature.
+  - Directly receives raw XML vouchers pushed from Tally.ERP 9 and TallyPrime over HTTP/HTTPS.
+  - Automatic buffer decoding handling UTF-8, UTF-16LE, and UTF-16BE with or without Byte-Order-Mark (BOM).
+  - Automatically parses incoming vouchers and masters via `parseTallyXml`:
+    - Saves invoices atomically to `data/bills/` with full business profile backfilled.
+    - Upserts client ledgers to `data/clients/` with addresses, state, and GSTIN.
+    - Upserts stock items to `data/products/` with HSN codes, tax rates, and units.
+    - Automatically backfills missing line-item HSN codes from existing inventory catalog.
+  - Responds with standard Tally-compatible XML status (`<RESPONSE><STATUS>Success</STATUS>...</RESPONSE>`) confirming saved counts (`<VOUCHERS_SAVED>`, `<CREATED>`).
+  - Integrated optional App PIN screen-lock defense via HTTP Basic Auth or `x-pin` header.
+  - Added new **Live Upload (Alt + O)** tab in `TallySyncModal`:
+    - Provides real-time Webhook URL with one-click clipboard copy.
+    - Complete step-by-step setup walkthrough matching Tally's Voucher Upload screen.
+    - Clear 2-Way Synchronization architectural guide explaining Tally ➔ App and App ➔ Tally data flow, and clarifying why Tally.NET Sync is a closed proprietary protocol.
+
+---
+
 ## [1.10.87] - 2026-10-31
 
 ### Fixed & Enhanced

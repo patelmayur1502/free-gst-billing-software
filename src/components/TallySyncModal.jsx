@@ -1,6 +1,6 @@
-// v1.10.87 - Tally Sync Modal: 1-Click Export to Tally XML (for CA) & Import Masters / Sales with HSN code auto-detection
+// v1.10.88 - Tally Sync Modal: 1-Click Export to Tally XML (for CA), Import Masters / Sales with HSN, and Live Upload (Alt + O)
 import { useState } from 'react';
-import { X, Download, Upload, CheckCircle, Layers, AlertTriangle, RefreshCw } from 'lucide-react';
+import { X, Download, Upload, CheckCircle, Layers, AlertTriangle, RefreshCw, Globe, Copy, Check } from 'lucide-react';
 import { exportToTallyXml } from '../utils/tallyExport.js';
 import { parseTallyXml, detectDuplicateInvoices, resolveDuplicateBill, normalizeItemKey } from '../utils/tallyImport.js';
 import {
@@ -11,7 +11,7 @@ import { localToday, belongsToProfile } from '../utils';
 import { toast } from './Toast';
 
 export default function TallySyncModal({ show, onClose }) {
-  const [activeTab, setActiveTab] = useState('export'); // 'export' | 'import'
+  const [activeTab, setActiveTab] = useState('export'); // 'export' | 'import' | 'webhook'
   const [period, setPeriod] = useState('month'); // 'month' | 'last-month' | 'fy'
   const [includeSales, setIncludeSales] = useState(true);
   const [includePurchases, setIncludePurchases] = useState(true);
@@ -25,6 +25,7 @@ export default function TallySyncModal({ show, onClose }) {
   const [progressText, setProgressText] = useState('');
   const [duplicateStrategy, setDuplicateStrategy] = useState('keep-both'); // 'keep-both' | 'replace' | 'skip'
   const [duplicateInfo, setDuplicateInfo] = useState(null);
+  const [copiedUrl, setCopiedUrl] = useState(false);
 
   if (!show) return null;
 
@@ -426,6 +427,13 @@ export default function TallySyncModal({ show, onClose }) {
             style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6 }}>
             <Upload size={14} /> Import Tally XML (Masters / Sales)
           </button>
+          <button
+            type="button"
+            className={activeTab === 'webhook' ? 'btn btn-primary' : 'btn btn-secondary'}
+            onClick={() => setActiveTab('webhook')}
+            style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Globe size={14} /> Live Upload (Alt + O)
+          </button>
         </div>
 
         {activeTab === 'export' ? (
@@ -665,6 +673,92 @@ export default function TallySyncModal({ show, onClose }) {
                   <CheckCircle size={15} /> {isImporting ? (progressText || 'Importing…') : 'Import into Database'}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'webhook' && (
+          <div>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: 1.45 }}>
+              Push vouchers directly from <strong>Tally.ERP 9</strong> or <strong>TallyPrime</strong> into this app using Tally&apos;s built-in <strong>Voucher Upload (Alt + O)</strong> feature.
+            </p>
+
+            <div style={{
+              background: 'var(--bg-card, #f9fafb)',
+              border: '1px solid var(--border-color, #e5e7eb)',
+              borderRadius: '8px',
+              padding: '1rem',
+              marginBottom: '1rem',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>Webhook URL for Tally</strong>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    const url = `${window.location.origin}/api/tally/upload`;
+                    navigator.clipboard.writeText(url);
+                    setCopiedUrl(true);
+                    setTimeout(() => setCopiedUrl(false), 2000);
+                  }}
+                  style={{ fontSize: '0.75rem', padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  {copiedUrl ? <Check size={13} color="green" /> : <Copy size={13} />}
+                  {copiedUrl ? 'Copied!' : 'Copy URL'}
+                </button>
+              </div>
+
+              <div style={{
+                background: 'var(--bg-main, #ffffff)',
+                border: '1px dashed var(--border-color, #cbd5e1)',
+                borderRadius: '6px',
+                padding: '8px 12px',
+                fontFamily: 'monospace',
+                fontSize: '0.85rem',
+                color: 'var(--primary)',
+                wordBreak: 'break-all',
+                marginBottom: '1rem',
+              }}>
+                {typeof window !== 'undefined' ? `${window.location.origin}/api/tally/upload` : 'https://billing.ecozen.in/api/tally/upload'}
+              </div>
+
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                <div style={{ fontWeight: 600, marginBottom: '0.5rem', color: 'var(--text-primary)' }}>
+                  How to configure in Tally.ERP 9 / TallyPrime:
+                </div>
+                <ol style={{ paddingLeft: '1.25rem', margin: 0, lineHeight: 1.6 }}>
+                  <li>Open any Sales Voucher or Day Book in Tally.</li>
+                  <li>Press <strong>Alt + O</strong> (Upload) on your keyboard.</li>
+                  <li>Set <strong>Upload to</strong> : <code>Web Page (HTTP/HTTPS)</code></li>
+                  <li>Paste the <strong>URL</strong> above.</li>
+                  <li>Set <strong>Secure Server</strong> : <code>{typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'Yes' : 'No'}</code></li>
+                  <li>Set <strong>Output format</strong> : <code>XML (Data Interchange)</code></li>
+                  <li>Press Enter to Upload. Tally will upload the voucher directly into this app!</li>
+                </ol>
+              </div>
+            </div>
+
+            <div style={{
+              background: 'rgba(59, 130, 246, 0.08)',
+              border: '1px solid rgba(59, 130, 246, 0.25)',
+              borderRadius: '8px',
+              padding: '0.85rem',
+              marginBottom: '1rem',
+              fontSize: '0.78rem',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.5,
+            }}>
+              <strong style={{ color: 'var(--primary)', display: 'block', marginBottom: '0.25rem' }}>
+                💡 Two-Way Synchronization Guide
+              </strong>
+              <div>• <strong>Tally ➔ App:</strong> Use <strong>Alt + O</strong> (above) or export Day Book XML and use the <strong>Import Tally XML</strong> tab.</div>
+              <div>• <strong>App ➔ Tally:</strong> Use the <strong>Export for CA (Tally XML)</strong> tab, then in Tally go to <em>Gateway of Tally &gt; Import of Data &gt; Vouchers</em>.</div>
+              <div style={{ marginTop: '0.35rem', color: 'var(--text-muted)' }}>
+                <em>Note on Tally.NET Sync:</em> Tally&apos;s &quot;Client Rule Sync via Tally.NET&quot; is a closed internal protocol designed exclusively between two licensed Tally instances. Direct HTTP Voucher Upload (Alt + O) provides seamless web synchronization.
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
             </div>
           </div>
         )}

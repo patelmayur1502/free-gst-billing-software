@@ -30,6 +30,7 @@
 | `GET` | `/api/export` | Full database export bundle | JSON bundle of server + local data |
 | `GET` | `/api/gstin-lookup/:gstin` | GSTIN taxpayer lookup & offline resolution | Local cache + offline fallback |
 | `POST` | `/api/import` | Selective database import & restore | 500MB payload limit |
+| `ALL`  | `/api/tally/upload` | Tally Voucher Upload webhook (Alt + O) | Auto-parses XML & backfills HSN |
 | `GET` | `/api/backups` | List rolling 30-day backups & D: mirrors | Reads timestamps from disk |
 | `POST` | `/api/backups/now` | Trigger on-demand backup snapshot | Rate-limited: max 1 per 5s |
 | `POST` | `/api/backups/:date/restore` | Safe transactional rollback restore | Creates `pre-restore` snapshot first |
@@ -69,19 +70,10 @@
 
 ## 3. SCHEDULED TIMERS & BACKGROUND JOBS
 
-1. **Daily Backup Engine (`runDailyBackup`)**:
-   - Executes 5 seconds after server boot, then checks hourly via `setInterval(..., 3600000)`.
-   - Copies all active directories to `./data/backups/YYYY-MM-DD/`.
-   - Mirrors snapshot to secondary user-selected folder (e.g. `D:\FreeGSTBill Backups`) if configured.
-   - Automatically purges backups older than 30 days.
-2. **Recurring Invoice Auto-Fire (`processDueRecurring`)**:
-   - Executes 3 seconds after boot, then checks hourly via `setInterval(..., 3600000)`.
-   - Yields to the event loop on each iteration (`await yieldToLoop()`) to prevent HTTP handler starvation.
-   - Advances template schedule using calendar-aware `advanceDate` (preserving anchor day across Feb 28/29).
-3. **Trash Bin Purge (`purgeOldTrash`)**:
-   - Executes 10 seconds after boot and every 24 hours. Purges records older than 30 days.
-4. **Log Rotation (`rotateErrorsIfLarge`)**:
-   - Opportunistically rotates `./data/errors.log` when size exceeds 200KB, rewriting the tail atomically.
+1. **Daily Backup Engine (`runDailyBackup`)**: Runs 5s post-boot and hourly. Snapshots to `./data/backups/YYYY-MM-DD/`, mirrors to secondary drive (e.g. D:), purges >30 days.
+2. **Recurring Invoice Auto-Fire (`processDueRecurring`)**: Runs 3s post-boot and hourly. Yields loop per iteration (`yieldToLoop()`), preserves calendar anchors.
+3. **Trash Bin Purge (`purgeOldTrash`)**: Runs 10s post-boot and daily. Purges records >30 days.
+4. **Log Rotation (`rotateErrorsIfLarge`)**: Opportunistically rotates `./data/errors.log` when >200KB.
 
 ---
 
@@ -125,7 +117,7 @@ src/
 ## 5. TOOLING & TEST SUITES
 
 - **Unit Tests (`scripts/*-test.mjs`)**:
-  * 350+ comprehensive assertions across 8 test suites (Tax, Discounts, CSV, Item History, GSTIN Lookup, Tally Export, Tally Import, Products Movement Ledger).
+  * 360+ comprehensive assertions across 9 test suites (Tax, Discounts, CSV, Item History, GSTIN Lookup, Tally Export, Tally Import, Products Ledger, Tally Upload).
   * Executed via: `$env:PATH = "C:\Program Files\nodejs;" + $env:PATH; npm run test:unit`.
 - **Smoke Suite (`tests/smoke.mjs`)**:
   * 115+ automated browser scenarios run in Playwright Firefox against real server instances.

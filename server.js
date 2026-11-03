@@ -13,6 +13,7 @@ import { fileURLToPath } from 'url';
 // re-implemented totals inline and silently reintroduced every bug the
 // v1.10.1 extraction fixed. Same source of truth now.
 import { templateTotals, clientYearToDate, nextCounterValue, startFor, numberSeriesFor, counterKeyFor, formatDocNumber, businessKeyOf, getFinancialYearLabel, INVOICE_TYPES } from './src/utils.js';
+import { parseTallyXml, sanitizeTallyXml } from './src/utils/tallyImport.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, 'data');
@@ -85,10 +86,17 @@ const LOCAL_PREFS_ROUTE = '/api/local-prefs';
 // profile, logo and signature images included, so a few hundred invoices
 // with a logo passed 5mb and Restore failed with "Request body too large".
 const IMPORT_ROUTE = '/api/import';
+// v1.10.88 - Tally Voucher Upload endpoint (Alt + O) sends raw XML
+const TALLY_UPLOAD_PREFIX = '/api/tally';
 const jsonBody = express.json({ limit: '5mb' });
 const importBody = express.json({ limit: '500mb' });
+const tallyRawBody = express.raw({
+  type: ['text/xml', 'application/xml', 'text/plain', 'application/x-www-form-urlencoded', '*/*'],
+  limit: '50mb',
+});
 app.use((req, res, next) => {
   if (req.path === LOCAL_PREFS_ROUTE) return next();
+  if (req.path.startsWith(TALLY_UPLOAD_PREFIX)) return tallyRawBody(req, res, next);
   return (req.path === IMPORT_ROUTE ? importBody : jsonBody)(req, res, next);
 });
 
@@ -951,6 +959,224 @@ app.post('/api/import', (req, res) => {
   }
 
   res.json({ ...counts, hasProfile: !!data.profile });
+});
+
+// ========================
+// TALLY ERP 9 / TALLYPRIME VOUCHER UPLOAD WEBHOOK (v1.10.88)
+// ========================
+// Accepts direct HTTP POST / PUT from Tally's "Alt + O" (Upload Voucher).
+// In Tally: Alt + O -> Web Page (HTTP/HTTPS) -> URL: https://billing.ecozen.in/api/tally/upload
+// Format: XML (Data Interchange).
+app.all(['/api/tally/upload', '/api/tally/upload/*'], async (req, res) => {
+  // GET returns endpoint readiness in Tally-friendly XML or JSON
+  if (req.method === 'GET') {
+    if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {
+      return res.json({ ok: true, status: 'Success', message: 'Tally Voucher Upload webhook is active and ready' });
+    }
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Success</STATUS>
+  <MESSAGE>Free GST Billing Software Tally Voucher Upload endpoint is active.</MESSAGE>
+  <ENDPOINT>/api/tally/upload</ENDPOINT>
+  <METHOD>POST / PUT</METHOD>
+</RESPONSE>`);
+  }
+
+  if (req.method !== 'POST' && req.method !== 'PUT') {
+    return res.status(405).json({ error: 'Method not allowed. Use POST or PUT.' });
+  }
+
+  try {
+    // PIN lock check (if app PIN lock is turned on)
+    const lock = currentLock();
+    if (lock) {
+      let providedPin = req.query.pin || req.headers['x-pin'] || '';
+      if (!providedPin && req.headers.authorization?.startsWith('Basic ')) {
+        try {
+          const creds = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf-8');
+          const parts = creds.split(':');
+          providedPin = parts[1] || parts[0] || '';
+        } catch { /* ignore parsing errors */ }
+      }
+      if (!pinMatches(lock, providedPin)) {
+        res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+        return res.status(401).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Failed</STATUS>
+  <MESSAGE>PIN verification required. Enter your app PIN in the Password field in Tally Voucher Upload.</MESSAGE>
+  <ERRORS>1</ERRORS>
+</RESPONSE>`);
+      }
+    }
+
+    // Decode incoming raw XML payload (support UTF-16LE, UTF-16BE, UTF-8)
+    let rawXml = '';
+    if (Buffer.isBuffer(req.body)) {
+      if (req.body.length >= 2 && req.body[0] === 0xff && req.body[1] === 0xfe) {
+        rawXml = req.body.toString('utf16le');
+      } else if (req.body.length >= 2 && req.body[0] === 0xfe && req.body[1] === 0xff) {
+        rawXml = req.body.toString('utf16be');
+      } else {
+        rawXml = req.body.toString('utf-8');
+      }
+    } else if (typeof req.body === 'string') {
+      rawXml = req.body;
+    }
+
+    if (!rawXml || !rawXml.trim()) {
+      res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+      return res.status(400).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Failed</STATUS>
+  <MESSAGE>No XML payload received in request body.</MESSAGE>
+  <ERRORS>1</ERRORS>
+</RESPONSE>`);
+    }
+
+    const cleanXml = sanitizeTallyXml(rawXml);
+    const existingProducts = readAllFromDir('products');
+    const existingClients = readAllFromDir('clients');
+    const profile = readJSON(PROFILE_PATH, DEFAULT_PROFILE);
+
+    const parsed = parseTallyXml(cleanXml, { products: existingProducts });
+
+    let savedClientsCount = 0;
+    let savedProductsCount = 0;
+    let savedBillsCount = 0;
+
+    // 1. Save or update Masters: Clients
+    for (const c of parsed.clients) {
+      if (!c || !c.name) continue;
+      const match = existingClients.find((ec) =>
+        (c.gstin && ec.gstin && c.gstin.toUpperCase() === ec.gstin.toUpperCase()) ||
+        ec.name?.trim().toLowerCase() === c.name.trim().toLowerCase()
+      );
+      const targetId = match ? match.id : (c.id || ('cli_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)));
+      const clientRecord = { ...(match || {}), ...c, id: targetId };
+      const filePath = path.join(DATA_DIR, 'clients', safeFileName(targetId) + '.json');
+      writeJSON(filePath, clientRecord);
+      if (!match) existingClients.push(clientRecord);
+      savedClientsCount++;
+    }
+
+    // 2. Save or update Masters: Products
+    for (const p of parsed.products) {
+      if (!p || !p.name) continue;
+      const match = existingProducts.find((ep) => ep.name?.trim().toLowerCase() === p.name.trim().toLowerCase());
+      const targetId = match ? match.id : (p.id || ('prod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)));
+      const productRecord = {
+        ...(match || {}),
+        ...p,
+        id: targetId,
+        hsn: p.hsn || match?.hsn || '',
+      };
+      const filePath = path.join(DATA_DIR, 'products', safeFileName(targetId) + '.json');
+      writeJSON(filePath, productRecord);
+      if (!match) existingProducts.push(productRecord);
+      savedProductsCount++;
+    }
+
+    // 3. Save Vouchers / Bills
+    for (const bill of parsed.bills) {
+      if (!bill) continue;
+      const invoiceNumber = bill.invoiceNumber || bill.id;
+      if (!invoiceNumber) continue;
+
+      if (!bill.data) bill.data = {};
+      if (!bill.data.profile || !bill.data.profile.businessName) {
+        bill.data.profile = {
+          businessName: profile.businessName || '',
+          address: profile.address || '',
+          state: profile.state || '',
+          gstin: profile.gstin || '',
+          pan: profile.pan || '',
+          email: profile.email || '',
+          phone: profile.phone || '',
+          bankName: profile.bankName || '',
+          accountNumber: profile.accountNumber || '',
+          ifsc: profile.ifsc || '',
+          upiId: profile.upiId || '',
+          logo: profile.logo || '',
+          signature: profile.signature || '',
+        };
+      }
+
+      const filePath = path.join(DATA_DIR, 'bills', safeFileName(bill.id) + '.json');
+      writeJSON(filePath, bill);
+      savedBillsCount++;
+
+      // Register client from bill if not existing
+      if (bill.clientName && !existingClients.some(ec => ec.name?.trim().toLowerCase() === bill.clientName.trim().toLowerCase())) {
+        const clientData = bill.data?.client || {};
+        const newClientId = 'cli_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        const newClient = {
+          id: newClientId,
+          name: bill.clientName,
+          gstin: bill.clientGstin || clientData.gstin || '',
+          state: clientData.state || '',
+          country: clientData.country || 'India',
+          address: clientData.address || '',
+          pin: clientData.pin || '',
+          phone: clientData.phone || '',
+          email: clientData.email || '',
+        };
+        const cPath = path.join(DATA_DIR, 'clients', safeFileName(newClientId) + '.json');
+        writeJSON(cPath, newClient);
+        existingClients.push(newClient);
+        savedClientsCount++;
+      }
+    }
+
+    const totalSaved = savedBillsCount + savedProductsCount + savedClientsCount;
+    if (totalSaved === 0 && parsed.errors.length > 0) {
+      res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+      return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Failed</STATUS>
+  <MESSAGE>No vouchers or masters could be parsed: ${parsed.errors.join('; ')}</MESSAGE>
+  <CREATED>0</CREATED>
+  <ERRORS>${parsed.errors.length}</ERRORS>
+</RESPONSE>`);
+    }
+
+    // Return JSON if requested by client / API caller
+    if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {
+      return res.json({
+        ok: true,
+        status: 'Success',
+        totalSaved,
+        vouchersSaved: savedBillsCount,
+        clientsSaved: savedClientsCount,
+        productsSaved: savedProductsCount,
+        errors: parsed.errors,
+      });
+    }
+
+    // Universal Tally XML response for "Alt + O" Voucher Upload
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Success</STATUS>
+  <MESSAGE>Voucher uploaded successfully to Free GST Billing Software</MESSAGE>
+  <CREATED>${totalSaved}</CREATED>
+  <VOUCHERS_SAVED>${savedBillsCount}</VOUCHERS_SAVED>
+  <CLIENTS_SAVED>${savedClientsCount}</CLIENTS_SAVED>
+  <PRODUCTS_SAVED>${savedProductsCount}</PRODUCTS_SAVED>
+  <ALTERED>0</ALTERED>
+  <DELETED>0</DELETED>
+  <ERRORS>${parsed.errors.length}</ERRORS>
+</RESPONSE>`);
+  } catch (err) {
+    console.error('Tally upload webhook error:', err);
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    return res.status(500).send(`<?xml version="1.0" encoding="UTF-8"?>
+<RESPONSE>
+  <STATUS>Failed</STATUS>
+  <MESSAGE>Internal error processing Tally XML: ${err.message || 'Unknown error'}</MESSAGE>
+  <ERRORS>1</ERRORS>
+</RESPONSE>`);
+  }
 });
 
 // ========================

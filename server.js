@@ -968,6 +968,7 @@ app.post('/api/import', (req, res) => {
 // In Tally: Alt + O -> Web Page (HTTP/HTTPS) -> URL: https://billing.ecozen.in/api/tally/upload
 // Format: XML (Data Interchange).
 app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
+  console.log(`[tally] Incoming ${req.method} request to ${req.originalUrl} from ${req.ip || req.socket.remoteAddress} (Content-Type: ${req.headers['content-type'] || 'none'})`);
   // GET returns endpoint readiness in Tally-friendly XML or JSON
   if (req.method === 'GET') {
     if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {
@@ -988,26 +989,25 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
   }
 
   try {
-    // PIN lock check (if app PIN lock is turned on)
+    // Optional PIN verification: if caller provided a PIN or Basic Auth and lock is configured, verify it
     const lock = currentLock();
-    if (lock) {
-      let providedPin = req.query.pin || req.headers['x-pin'] || '';
-      if (!providedPin && req.headers.authorization?.startsWith('Basic ')) {
-        try {
-          const creds = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf-8');
-          const parts = creds.split(':');
-          providedPin = parts[1] || parts[0] || '';
-        } catch { /* ignore parsing errors */ }
-      }
-      if (!pinMatches(lock, providedPin)) {
-        res.setHeader('Content-Type', 'text/xml; charset=utf-8');
-        return res.status(401).send(`<?xml version="1.0" encoding="UTF-8"?>
+    let providedPin = req.query.pin || req.headers['x-pin'] || '';
+    if (!providedPin && req.headers.authorization?.startsWith('Basic ')) {
+      try {
+        const creds = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf-8');
+        const parts = creds.split(':');
+        providedPin = parts[1] || parts[0] || '';
+      } catch { /* ignore parsing errors */ }
+    }
+    if (providedPin && lock && !pinMatches(lock, providedPin)) {
+      console.warn('[tally] Upload refused: Invalid PIN provided in Password field');
+      res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+      return res.status(401).send(`<?xml version="1.0" encoding="UTF-8"?>
 <RESPONSE>
   <STATUS>Failed</STATUS>
-  <MESSAGE>PIN verification required. Enter your app PIN in the Password field in Tally Voucher Upload.</MESSAGE>
+  <MESSAGE>Invalid PIN provided in Password field.</MESSAGE>
   <ERRORS>1</ERRORS>
 </RESPONSE>`);
-      }
     }
 
     // Decode incoming raw XML payload (support UTF-16LE, UTF-16BE, UTF-8)
@@ -1040,6 +1040,7 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
     const profile = readJSON(PROFILE_PATH, DEFAULT_PROFILE);
 
     const parsed = parseTallyXml(cleanXml, { products: existingProducts });
+    console.log(`[tally] Parsed: ${parsed.bills.length} bills (${parsed.bills.map(b => b.invoiceNumber || b.id).join(', ') || 'none'}), ${parsed.clients.length} clients, ${parsed.products.length} products, errors: ${parsed.errors.length}`);
 
     let savedClientsCount = 0;
     let savedProductsCount = 0;
@@ -1139,6 +1140,8 @@ app.all(/^\/api\/tally\/upload(\/.*)?$/, async (req, res) => {
   <ERRORS>${parsed.errors.length}</ERRORS>
 </RESPONSE>`);
     }
+
+    console.log(`[tally] Upload complete. Saved ${savedBillsCount} bills, ${savedClientsCount} clients, ${savedProductsCount} products.`);
 
     // Return JSON if requested by client / API caller
     if (req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !req.headers.accept?.includes('xml'))) {

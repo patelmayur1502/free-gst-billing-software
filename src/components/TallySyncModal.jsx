@@ -731,6 +731,7 @@ export default function TallySyncModal({ show, onClose }) {
                   <li>Set <strong>Upload to</strong> : <code>Web Page (HTTP/HTTPS)</code></li>
                   <li>Paste the <strong>URL</strong> above.</li>
                   <li>Set <strong>Secure Server</strong> : <code>{typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'Yes' : 'No'}</code></li>
+                  <li>Set <strong>Password (if any)</strong> : <code>Your App PIN</code> (if PIN lock is enabled, else leave blank).</li>
                   <li>Set <strong>Output format</strong> : <code>XML (Data Interchange)</code></li>
                   <li>Press Enter to Upload. Tally will upload the voucher directly into this app!</li>
                 </ol>
